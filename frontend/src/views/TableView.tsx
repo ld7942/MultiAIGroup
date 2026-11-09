@@ -114,16 +114,50 @@ function CardChips({ cards }: { cards: any[] }) {
   );
 }
 
-function ValueView({ field, value }: { field: string; value: any }) {
+function DetailRows({ rows }: { rows: { title: string; tags: string[] }[] }) {
+  if (!rows.length) return <span className="muted small">无</span>;
+  return (
+    <div className="reads">
+      {rows.map((row, index) => (
+        <div className="read-item" key={`${row.title}-${index}`}>
+          <div className="read-head">
+            <span className="small" style={{ fontWeight: 600 }}>{row.title}</span>
+            {row.tags.map((tag) => (
+              <span className="chip accent" key={tag}>{tag}</span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** 把嵌套结构（狼队友 / 查验记录 / 全员身份 / 全员手牌）渲染成可读列表。 */
+function ValueView({ field, value, names }: { field: string; value: any; names: Record<string, string> }) {
+  const seatName = (id: string) => names[id] || id;
   if (Array.isArray(value)) {
-    if (value.length && typeof value[0] === "object" && value[0] !== null && "label" in value[0]) {
-      return <CardChips cards={value} />;
+    if (value.length && typeof value[0] === "object" && value[0] !== null) {
+      if ("label" in value[0]) {
+        return <CardChips cards={value} />;
+      }
+      return (
+        <DetailRows
+          rows={value.map((item: any) => ({
+            title: item.name || seatName(item.seat || item.id || ""),
+            tags: [
+              item.round !== undefined ? `R${item.round}` : "",
+              typeof item.alive === "boolean" ? (item.alive ? "存活" : "出局") : "",
+              item.result ? String(item.result) : "",
+            ].filter(Boolean),
+          }))}
+        />
+      );
     }
     if (value.length && typeof value[0] === "string") {
       return (
         <div className="tag-list">
           {value.map((item) => (
-            <span className="chip" key={item}>{item}</span>
+            <span className="chip" key={item}>{field === "teammate" ? seatName(item) : item}</span>
           ))}
         </div>
       );
@@ -132,6 +166,20 @@ function ValueView({ field, value }: { field: string; value: any }) {
   }
   if (value !== null && typeof value === "object") {
     if (field === "reads") return <ReadsList reads={value} />;
+    const entries = Object.entries(value);
+    if (entries.length && entries.every(([, item]) => item !== null && typeof item === "object")) {
+      return (
+        <DetailRows
+          rows={entries.map(([key, item]: [string, any]) => ({
+            title: item.name || seatName(key),
+            tags: [
+              item.label || item.role ? String(item.label || item.role) : "",
+              Array.isArray(item) ? item.join(" ") : "",
+            ].filter(Boolean),
+          }))}
+        />
+      );
+    }
     return <pre className="json-block">{JSON.stringify(value, null, 2)}</pre>;
   }
   if (typeof value === "boolean") {
@@ -168,7 +216,7 @@ function ReadsList({ reads }: { reads: any }) {
   );
 }
 
-function PrivatePanel({ data }: { data: Record<string, any> }) {
+function PrivatePanel({ data, names }: { data: Record<string, any>; names: Record<string, string> }) {
   const entries = Object.entries(data);
   if (!entries.length) return <div className="muted small">暂无私有信息</div>;
   const role = data.role_label || data.role;
@@ -188,7 +236,7 @@ function PrivatePanel({ data }: { data: Record<string, any> }) {
             <div key={key} style={{ display: "contents" }}>
               <dt>{KEY_LABELS[key] || key}</dt>
               <dd style={{ whiteSpace: "normal" }}>
-                <ValueView field={key} value={value} />
+                <ValueView field={key} value={value} names={names} />
               </dd>
             </div>
           ))}
@@ -350,6 +398,12 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
   const seatMap = useMemo(() => {
     const map: Record<string, MatchSeat> = {};
     seats.forEach((seat) => (map[seat.id] = seat));
+    return map;
+  }, [seats]);
+
+  const seatNames = useMemo(() => {
+    const map: Record<string, string> = {};
+    seats.forEach((seat) => (map[seat.id] = seat.name));
     return map;
   }, [seats]);
 
@@ -581,7 +635,7 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
             {activeSeat && activeSeat.persona && (
               <div className="muted tiny mb">人设：{activeSeat.persona}</div>
             )}
-            <PrivatePanel data={privates[activeSeatId] || {}} />
+            <PrivatePanel data={privates[activeSeatId] || {}} names={seatNames} />
           </div>
 
           <div className="card inspector-card">
