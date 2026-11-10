@@ -18,6 +18,63 @@ from typing import Any, Literal
 
 VisibilityScope = Literal["public", "private", "group"]
 
+# ---------- 通用牌桌区域约定 ----------
+# 插件用固定键描述“牌桌”，前端只认这些键即可跨游戏渲染，不必为每个游戏写一套界面：
+#   public_state:  seats（座位公开信息）/ last_play（最近出牌）/ discard / deck / table
+#   private_state: hand（手牌）/ items（个人道具）
+# 卡片统一为 {"id", "label", ...}；道具统一为 {"key", "label", "available"}。
+def card_ref(card: dict | str) -> dict:
+    if isinstance(card, dict):
+        return {
+            "id": str(card.get("id", "")),
+            "label": str(card.get("label") or card.get("name") or card.get("id") or "?"),
+        }
+    return {"id": str(card), "label": str(card)}
+
+
+def table_play(
+    seat_id: str,
+    cards: list,
+    *,
+    kind: str = "",
+    target: str | None = None,
+    round_no: int | None = None,
+) -> dict:
+    """构造统一的 public_state["last_play"]。
+
+    牌桌中央的“最近出牌”只需要这些字段：谁出的、出了什么、牌型/类型、对谁。
+    """
+    refs = [card_ref(card) for card in cards]
+    play: dict = {
+        "seat": seat_id,
+        "cards": [ref["id"] for ref in refs],
+        "labels": [ref["label"] for ref in refs],
+    }
+    if kind:
+        play["kind"] = kind
+    if target:
+        play["target"] = target
+    if round_no is not None:
+        play["round"] = round_no
+    return play
+
+
+def item_ref(
+    key: str,
+    label: str,
+    *,
+    available: bool = True,
+    uses: int | None = None,
+    description: str = "",
+) -> dict:
+    """构造统一的 private_state["items"] 条目（狼人解药、猎人一枪等）。"""
+    item: dict = {"key": key, "label": label, "available": available}
+    if uses is not None:
+        item["uses"] = uses
+    if description:
+        item["description"] = description
+    return item
+
 
 class ActionError(Exception):
     """AI 提交了非法动作，编排器会带着错误信息让 AI 重试。"""
@@ -148,6 +205,14 @@ class GameEngine(ABC):
     allowed_counts: tuple[int, ...] = ()
     rules: str = ""
     presets: list[dict] = []
+
+    # 前端据此决定渲染哪些牌桌区域，不必按 game_id 写死。
+    capabilities: dict[str, bool] = {
+        "hand": False,
+        "items": False,
+        "table_cards": False,
+        "hidden_roles": False,
+    }
 
     # 每局为每个座位随机分配一种性格，避免所有 AI 用同一套固定套路。
     STYLES: list[dict] = [
@@ -379,6 +444,7 @@ class GameEngine(ABC):
             "phase": self.phase,
             "finished": self.finished,
             "result": self.result,
+            "capabilities": dict(self.capabilities),
             "public_state": self.public_state(),
             "requests": [r.to_dict() for r in self.current_requests()],
         }

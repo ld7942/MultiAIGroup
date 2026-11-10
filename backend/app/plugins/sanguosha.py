@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from ..engine import ActionError, ActionOption, ActionRequest, GameEngine, Seat, Visibility
+from ..cardgame import CardGameEngine
+from ..engine import ActionError, ActionOption, ActionRequest, Seat, Visibility
 
 ROLE_LABEL = {"lord": "主公", "loyal": "忠臣", "rebel": "反贼", "spy": "内奸"}
 ROLE_CAMP = {"lord": "主公阵营", "loyal": "主公阵营", "rebel": "反贼阵营", "spy": "内奸"}
@@ -39,13 +40,14 @@ IDENTITY_SKILLS = {
 }
 
 
-class SanguoshaEngine(GameEngine):
+class SanguoshaEngine(CardGameEngine):
     game_id = "sanguosha"
     name = "三国杀"
     description = "简化 4/5 人身份局：杀、闪、桃、无中生有、过河拆桥、决斗，包含响应与濒死。"
     min_players = 4
     max_players = 5
     allowed_counts = (4, 5)
+    capabilities = {"hand": True, "items": False, "table_cards": True, "hidden_roles": True}
     presets = [
         {"id": "four", "name": "4 人身份局", "players": 4, "description": "主公 / 忠臣 / 反贼 / 内奸"},
         {"id": "five", "name": "5 人身份局", "players": 5, "description": "主公 / 忠臣 / 反贼×2 / 内奸"},
@@ -110,6 +112,7 @@ class SanguoshaEngine(GameEngine):
             self.max_hp[seat.id] = 5 if self.roles[seat.id] == "lord" else 4
             self.hp[seat.id] = self.max_hp[seat.id]
         self._build_deck()
+        self.clear_play()
         self.emit("game_start", f"三国杀 {len(self.seats)} 人身份局开始。主公是 {lord.name}。")
         for seat in self.seats:
             role = self.roles[seat.id]
@@ -440,6 +443,13 @@ class SanguoshaEngine(GameEngine):
             self.hand[req.seat_id] = [c for c in self.hand[req.seat_id] if c["id"] != card_id]
             self.discard.append(card)
             ctype = card["type"]
+            self.last_play = self.record_play(
+                req.seat_id,
+                [card],
+                kind=CARD_LABEL.get(ctype, ctype),
+                target=target if ctype in {"slash", "dismantle", "duel"} else None,
+                round_no=self.turn_no,
+            )
             # 先聊天，再播报使用的牌。
             self.say(req.seat_id, str(action.get("speech") or "").strip())
             if ctype == "slash":
@@ -486,6 +496,7 @@ class SanguoshaEngine(GameEngine):
                 card = next(c for c in self.hand[target] if c["id"] == action.get("card"))
                 self.hand[target] = [c for c in self.hand[target] if c["id"] != card["id"]]
                 self.discard.append(card)
+                self.last_play = self.record_play(target, [card], kind="闪", round_no=self.turn_no)
                 self.emit("respond", f"{self.seat_map[target].name} 打出【闪】，抵消了这次【杀】。", seat_id=target, card="闪")
             else:
                 self.emit("respond", f"{self.seat_map[target].name} 没有闪，受到 1 点伤害。", seat_id=target)
@@ -498,6 +509,7 @@ class SanguoshaEngine(GameEngine):
                 card = next(c for c in self.hand[target] if c["id"] == action.get("card"))
                 self.hand[target] = [c for c in self.hand[target] if c["id"] != card["id"]]
                 self.discard.append(card)
+                self.last_play = self.record_play(target, [card], kind="杀", round_no=self.turn_no)
                 self.emit("respond", f"{self.seat_map[target].name} 打出【杀】，化解了决斗。", seat_id=target, card="杀")
             else:
                 self.emit("respond", f"{self.seat_map[target].name} 无法出杀，受到 1 点决斗伤害。", seat_id=target)
@@ -510,6 +522,7 @@ class SanguoshaEngine(GameEngine):
                 card = next(c for c in self.hand[seat] if c["id"] == action.get("card"))
                 self.hand[seat] = [c for c in self.hand[seat] if c["id"] != card["id"]]
                 self.discard.append(card)
+                self.last_play = self.record_play(seat, [card], kind="桃", round_no=self.turn_no)
                 self.hp[seat] = 1
                 self.dying_seat = None
                 self.emit("respond", f"{self.seat_map[seat].name} 使用【桃】自救，回复到 1 点体力。", seat_id=seat, card="桃")
@@ -619,6 +632,7 @@ class SanguoshaEngine(GameEngine):
             "turn": self.turn,
             "deck_count": len(self.deck),
             "discard_count": len(self.discard),
+            "last_play": self.last_play,
             "seats": [
                 {
                     "id": s.id,

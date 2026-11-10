@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Iterable
 
-from ..engine import ActionError, ActionOption, ActionRequest, GameEngine, Seat, Visibility
+from ..cardgame import CardGameEngine
+from ..engine import ActionError, ActionOption, ActionRequest, Seat, Visibility
 
 SUITS = {"S": "♠", "H": "♥", "D": "♦", "C": "♣"}
 RANK_LABEL = {
@@ -211,13 +212,14 @@ FARMER_SKILL = """【农民】目标：配合队友，让任意一个农民先�
 - 炸弹留给地主即将走完或队友需要接力的关键回合。"""
 
 
-class DoudizhuEngine(GameEngine):
+class DoudizhuEngine(CardGameEngine):
     game_id = "doudizhu"
     name = "斗地主"
     description = "三人斗地主：叫地主、抢底牌，完整牌型与炸弹王炸判定。"
     min_players = 3
     max_players = 3
     allowed_counts = (3,)
+    capabilities = {"hand": True, "items": False, "table_cards": True, "hidden_roles": False}
     presets = [{"id": "classic", "name": "经典三人局", "players": 3, "description": "地主 vs 两位农民"}]
     rules = """斗地主（经典三人规则）
 【发牌】一副 54 张牌，每人 17 张，留 3 张底牌。
@@ -235,7 +237,6 @@ class DoudizhuEngine(GameEngine):
         self.bottom: list[dict] = []
         self.landlord: str | None = None
         self.turn: str | None = None
-        self.last_play: dict | None = None
         self.last_player: str | None = None
         self.passes = 0
         self.bid_queue: list[str] = []
@@ -256,6 +257,7 @@ class DoudizhuEngine(GameEngine):
         self.landlord = None
         self.turn = None
         self.last_play = None
+        self.recent_play = None
         self.last_player = None
         self.passes = 0
         self.bids = {}
@@ -512,7 +514,7 @@ class DoudizhuEngine(GameEngine):
                 self.emit("pass", f"{self.seat_map[req.seat_id].name} 过牌。", seat_id=req.seat_id)
                 if self.passes >= 2 and self.last_player:
                     leader = self.last_player
-                    self.last_play = None
+                    self.clear_play()
                     self.last_player = None
                     self.passes = 0
                     self.turn = leader
@@ -524,14 +526,12 @@ class DoudizhuEngine(GameEngine):
             info = analyze(cards)
             assert info
             self.hands[req.seat_id] = [c for c in self.hands[req.seat_id] if c["id"] not in {x["id"] for x in cards}]
-            self.last_play = {
-                "seat": req.seat_id,
-                "cards": [c["id"] for c in cards],
-                "labels": [c["label"] for c in cards],
-                "kind": info["kind"],
-                "rank": info["rank"],
-                "length": info["length"],
-            }
+            self.last_play = self.record_play(
+                req.seat_id,
+                cards,
+                kind=info["kind"],
+                extra={"rank": info["rank"], "length": info["length"]},
+            )
             self.last_player = req.seat_id
             self.passes = 0
             # 先聊天，再播报出的牌。
@@ -579,6 +579,7 @@ class DoudizhuEngine(GameEngine):
                 for i, s in enumerate(self.seats)
             ],
             "last_play": self.last_play,
+            "recent_play": self.recent_play,
             "stage": self.stage,
         }
 

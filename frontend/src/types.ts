@@ -79,6 +79,7 @@ export interface Snapshot {
   phase: string;
   finished: boolean;
   result: Record<string, unknown> | null;
+  capabilities?: Record<string, boolean>;
   public_state: Record<string, any>;
   requests: ActionRequest[];
 }

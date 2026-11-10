@@ -21,23 +21,41 @@ export const API_BASE =
   (import.meta.env.VITE_API_BASE as string | undefined) || "http://127.0.0.1:8765";
 export const WS_BASE = API_BASE.replace(/^http/, "ws");
 
+// 后端刚启动时首次请求常常连不上，GET 请求自动重试几轮，避免必须切换页面才恢复。
+const RETRY_DELAYS = [500, 1200, 2500, 4000];
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
-  if (!resp.ok) {
-    let detail = `${resp.status} ${resp.statusText}`;
-    try {
-      const data = await resp.json();
-      detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data);
-    } catch {
-      /* ignore */
+  const method = (init?.method || "GET").toUpperCase();
+  const attempts = method === "GET" ? RETRY_DELAYS.length + 1 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS[attempt - 1]));
     }
-    throw new Error(detail);
+    try {
+      const resp = await fetch(`${API_BASE}${path}`, {
+        headers: { "Content-Type": "application/json" },
+        ...init,
+      });
+      if (!resp.ok) {
+        let detail = `${resp.status} ${resp.statusText}`;
+        try {
+          const data = await resp.json();
+          detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data);
+        } catch {
+          /* ignore */
+        }
+        throw new Error(detail);
+      }
+      if (resp.status === 204) return undefined as T;
+      return (await resp.json()) as T;
+    } catch (err) {
+      // 只有网络层失败（后端还没起来）才重试；HTTP 业务错误直接抛出。
+      if (!(err instanceof TypeError)) throw err;
+    }
   }
-  if (resp.status === 204) return undefined as T;
-  return (await resp.json()) as T;
+  throw new Error(
+    `无法连接后端 ${API_BASE}，请确认后端已启动（启动脚本：项目根目录 start.bat）。`,
+  );
 }
 
 const post = (path: string, body?: unknown) =>

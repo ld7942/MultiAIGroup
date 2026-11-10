@@ -13,23 +13,28 @@ type View = "lobby" | "providers" | "groups" | "voice" | "memory" | "train" | "t
 export default function App() {
   const [view, setView] = useState<View>("lobby");
   const [matchId, setMatchId] = useState<string | null>(null);
-  const [online, setOnline] = useState(false);
+  const [online, setOnline] = useState<boolean | null>(null);
 
   useEffect(() => {
     let alive = true;
+    let timer: number | undefined;
     const check = async () => {
       try {
         await api.health();
-        if (alive) setOnline(true);
+        if (!alive) return;
+        setOnline(true);
+        timer = window.setTimeout(check, 5000);
       } catch {
-        if (alive) setOnline(false);
+        if (!alive) return;
+        setOnline(false);
+        // 后端可能还在启动，未连接时加快轮询，连上后回到 5 秒。
+        timer = window.setTimeout(check, 1500);
       }
     };
     check();
-    const timer = setInterval(check, 5000);
     return () => {
       alive = false;
-      clearInterval(timer);
+      if (timer) window.clearTimeout(timer);
     };
   }, []);
 
@@ -95,7 +100,7 @@ export default function App() {
         <div className="sidebar-foot">
           <div className="health">
             <i className={`health-dot ${online ? "on" : ""}`} />
-            <span>后端 {online ? "已连接" : "未连接"}</span>
+            <span>后端 {online === null ? "连接中…" : online ? "已连接" : "未连接"}</span>
           </div>
           <div style={{ marginTop: 6 }}>127.0.0.1:8765</div>
           <div style={{ marginTop: 2 }}>v0.1.0</div>

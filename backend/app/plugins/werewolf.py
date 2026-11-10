@@ -62,6 +62,7 @@ class WerewolfEngine(GameEngine):
     min_players = 6
     max_players = 12
     allowed_counts = (6, 7, 8, 9, 10, 11, 12)
+    capabilities = {"hand": False, "items": True, "table_cards": False, "hidden_roles": True}
     presets = [
         {"id": "standard", "name": "9 人标准局", "players": 9, "description": "3 狼 + 预言家 + 女巫 + 猎人 + 3 村民"},
         {"id": "quick", "name": "6 人快速局", "players": 6, "description": "2 狼 + 预言家 + 女巫 + 2 村民"},

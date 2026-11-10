@@ -47,6 +47,7 @@ class GamePlugin:
             "allowed_counts": list(engine.allowed_counts),
             "presets": engine.presets,
             "rules": engine.rules,
+            "capabilities": dict(engine.capabilities),
         }
 
 

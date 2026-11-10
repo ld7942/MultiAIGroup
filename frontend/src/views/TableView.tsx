@@ -100,6 +100,29 @@ const KEY_LABELS: Record<string, string> = {
   text: "内容",
   user: "使用者",
   card: "卡牌",
+  items: "个人道具",
+  uses: "剩余次数",
+  description: "说明",
+  recent_play: "桌面最近出牌",
+  discard_count: "弃牌堆",
+  deck_count: "牌堆剩余",
+};
+
+const KIND_LABELS: Record<string, string> = {
+  single: "单张",
+  pair: "对子",
+  triple: "三张",
+  triple_single: "三带一",
+  triple_pair: "三带二",
+  straight: "顺子",
+  straight_pairs: "连对",
+  airplane: "飞机",
+  airplane_single: "飞机带单",
+  airplane_pair: "飞机带对",
+  four_two_single: "四带二",
+  four_two_pair: "四带两对",
+  bomb: "炸弹",
+  rocket: "王炸",
 };
 
 const EVENT_ICONS: Record<string, string> = {
@@ -151,6 +174,50 @@ function CardChips({ cards }: { cards: any[] }) {
 }
 
 const MAX_VALUE_DEPTH = 3;
+
+/** 牌桌中央的“最近出牌”，统一读取 public_state.last_play / recent_play。 */
+function CenterPile({
+  play,
+  discardCount,
+  names,
+}: {
+  play: Record<string, any>;
+  discardCount?: number;
+  names: Record<string, string>;
+}) {
+  const labels: string[] = Array.isArray(play.labels)
+    ? play.labels.map((item: any) => (typeof item === "string" ? item : String(item?.label ?? "")))
+    : Array.isArray(play.cards)
+      ? play.cards.map((item: any) => (typeof item === "string" ? item : String(item?.label ?? "")))
+      : play.card
+        ? [String(play.card)]
+        : [];
+  if (!labels.length) return null;
+  const actor = names[play.seat] || play.name || "";
+  const target = play.target ? names[play.target] || String(play.target) : "";
+  const rawKind = play.kind ? String(play.kind) : "";
+  const kind = KIND_LABELS[rawKind] || rawKind;
+  const showKind = kind && !(labels.length === 1 && labels[0] === kind);
+  return (
+    <div className="center-pile">
+      <div className="pile-meta">
+        {actor}
+        {target ? ` → ${target}` : ""}
+        {showKind ? ` · ${kind}` : ""}
+      </div>
+      <div className="pile-cards">
+        {labels.map((label, index) => (
+          <span className={`pile-card ${isRedCard(label) ? "red" : ""}`} key={`${label}-${index}`}>
+            {label}
+          </span>
+        ))}
+      </div>
+      {typeof discardCount === "number" && discardCount > 0 && (
+        <div className="pile-discard">弃牌堆 {discardCount} 张</div>
+      )}
+    </div>
+  );
+}
 
 function scalarText(value: any, key: string, names: Record<string, string>): string {
   if (typeof value === "boolean") return `${KEY_LABELS[key] || key}:${value ? "是" : "否"}`;
@@ -378,7 +445,10 @@ function GodPanel({
   names: Record<string, string>;
 }) {
   const publicState = (snapshot?.public_state || {}) as Record<string, any>;
-  const entries = Object.entries(publicState).filter(([key]) => key !== "seats");
+  // 桌面最近出牌已在牌桌中央展示，这里不重复。
+  const entries = Object.entries(publicState).filter(
+    ([key]) => key !== "seats" && key !== "recent_play",
+  );
   const publicSeats: any[] = Array.isArray(publicState.seats) ? publicState.seats : [];
   const publicById = new Map(publicSeats.map((item) => [item.id, item]));
   const review = (result?.review || {}) as Record<string, string[]>;
@@ -599,6 +669,7 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
   const [perspective, setPerspective] = useState("god");
   const [selected, setSelected] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
+  const [nowTs, setNowTs] = useState(() => Date.now());
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(false);
   const [muted, setMuted] = useState(() => {
@@ -615,6 +686,12 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
   useEffect(() => {
     mutedRef.current = muted;
   }, [muted]);
+
+  // 发言气泡只保留最近一段时间，需要每秒刷新一次过期判断。
+  useEffect(() => {
+    const timer = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     api.voice().then((cfg) => setVoiceEnabled(!!cfg.enabled)).catch(() => undefined);
@@ -758,6 +835,18 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
     );
   }, [events, perspective]);
 
+  // 每个座位只保留最后一句发言，用于牌桌上的对话气泡。
+  const speechBubbles = useMemo(() => {
+    const map: Record<string, { text: string; ts: number }> = {};
+    visibleEvents.forEach((ev) => {
+      const speech = ev.payload?.speech;
+      if (ev.type === "speech" && ev.seat_id && typeof speech === "string" && speech.trim()) {
+        map[ev.seat_id] = { text: speech.trim(), ts: ev.ts * 1000 };
+      }
+    });
+    return map;
+  }, [visibleEvents]);
+
   const latestReads = useMemo(() => {
     const map: Record<string, any[]> = { ...readsState };
     events.forEach((ev) => {
@@ -772,6 +861,24 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
   const finished = snapshot?.finished || status === "finished";
   const phase = snapshot?.phase || (snapshot?.public_state as any)?.phase || "";
   const round = snapshot?.round ?? (snapshot?.public_state as any)?.round ?? 0;
+
+  // 牌桌区域由引擎的 capabilities 决定，前端不再按 game_id 写死。
+  const capabilities = useMemo<Record<string, boolean>>(() => {
+    const caps = snapshot?.capabilities;
+    if (caps && typeof caps === "object") return caps;
+    const game = String((snapshot?.public_state as any)?.game || "");
+    return {
+      hand: game === "doudizhu" || game === "sanguosha",
+      items: game === "werewolf",
+      table_cards: game === "doudizhu" || game === "sanguosha",
+    };
+  }, [snapshot]);
+
+  const publicState = (snapshot?.public_state || {}) as Record<string, any>;
+  // 斗地主的 last_play 会在两家过牌后清空，recent_play 保留桌面展示用的最近一手。
+  const lastPlay = publicState.recent_play || publicState.last_play || null;
+  const discardCount =
+    typeof publicState.discard_count === "number" ? publicState.discard_count : undefined;
 
   const stop = async () => {
     try {
@@ -863,6 +970,9 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
                     : "等待推进")}
               </div>
               <div className="center-round">第 {round} 轮</div>
+              {capabilities.table_cards && lastPlay && (
+                <CenterPile play={lastPlay} discardCount={discardCount} names={seatNames} />
+              )}
               <div className="center-status">
                 {finished && (result as any)?.reason && (
                   <div className="muted">{String((result as any).reason)}</div>
@@ -879,6 +989,14 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
               const top = 50 + Math.sin(angle) * 33;
               const info = publicSeats[seat.id] || {};
               const dead = info.alive === false;
+              // 手牌/道具直接画在座位上：上帝视角或本人视角亮牌，其他视角只显示牌背。
+              const priv = privates[seat.id] || {};
+              const handCards: any[] = Array.isArray(priv.hand) ? priv.hand : [];
+              const items: any[] = Array.isArray(priv.items) ? priv.items : [];
+              const handCount = Number(info.hand_count ?? priv.hand_count ?? handCards.length ?? 0);
+              const revealHand = perspective === "god" || perspective === seat.id;
+              const bubble = speechBubbles[seat.id];
+              const showBubble = Boolean(bubble && nowTs - bubble.ts < 15000);
               return (
                 <div
                   key={seat.id}
@@ -890,6 +1008,9 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
                   }}
                   title={`查看 ${seat.name} 的视角`}
                 >
+                  {showBubble && (
+                    <div className={`seat-bubble ${top > 50 ? "up" : "down"}`}>{bubble!.text}</div>
+                  )}
                   <div className="seat-top">
                     <span className="seat-dot" style={{ background: seat.color || "#7c9cff" }} />
                     <div className="flex1">
@@ -911,6 +1032,36 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
                       <span className="stat">🔮 {latestReads[seat.id].length}</span>
                     )}
                   </div>
+                  {capabilities.hand && handCount > 0 && (
+                    <div className="seat-hand" title={`手牌 ${handCount} 张`}>
+                      {revealHand && handCards.length
+                        ? handCards.map((card: any) => (
+                            <span
+                              className={`mini-card ${isRedCard(String(card.label || "")) ? "red" : ""}`}
+                              key={card.id || card.label}
+                              title={String(card.label || "")}
+                            >
+                              {card.label}
+                            </span>
+                          ))
+                        : Array.from({ length: handCount }).map((_, i) => (
+                            <span className="mini-card back" key={i} />
+                          ))}
+                    </div>
+                  )}
+                  {items.length > 0 && (
+                    <div className="seat-items">
+                      {items.map((item: any) => (
+                        <span
+                          className={`mini-item ${item.available === false ? "off" : ""}`}
+                          key={item.key || item.label}
+                          title={item.description || (item.available === false ? "已使用 / 不可用" : "可用")}
+                        >
+                          {item.label}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })}
