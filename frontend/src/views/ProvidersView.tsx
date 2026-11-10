@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import VoicePicker from "../VoicePicker";
 import { api } from "../api";
 import type { Provider, ProviderPreset } from "../types";
 
@@ -10,6 +11,7 @@ const EMPTY = {
   api_key: "",
   temperature: 0.8,
   max_tokens: 1200,
+  voice_id: "",
 };
 
 type FormState = typeof EMPTY & { id?: string; extra?: Record<string, unknown> };
@@ -58,6 +60,7 @@ export default function ProvidersView() {
         model: form.model,
         temperature: Number(form.temperature),
         max_tokens: Number(form.max_tokens),
+        voice_id: form.voice_id,
         api_key: form.api_key || undefined,
         extra: form.extra || {},
       };
@@ -83,6 +86,7 @@ export default function ProvidersView() {
       api_key: "",
       temperature: p.temperature ?? 0.8,
       max_tokens: p.max_tokens ?? 1200,
+      voice_id: p.voice_id || "",
       extra: p.extra || {},
     });
     setNotice("");
@@ -181,6 +185,14 @@ export default function ProvidersView() {
             <span>Max Tokens</span>
             <input type="number" min="128" step="128" value={form.max_tokens} onChange={(e) => patch({ max_tokens: Number(e.target.value) })} />
           </label>
+          <label className="field">
+            <span>默认语音 ID（可选）</span>
+            <VoicePicker
+              value={form.voice_id}
+              onChange={(value) => patch({ voice_id: value })}
+              placeholder="选择默认音色，可被座位覆盖"
+            />
+          </label>
         </div>
         <div className="row mt">
           <button className="btn primary" onClick={save} disabled={busy}>
@@ -209,6 +221,8 @@ export default function ProvidersView() {
               <dd>{p.has_key ? "已配置" : "未配置"}</dd>
               <dt>参数</dt>
               <dd>temp {p.temperature} · {p.max_tokens} tokens</dd>
+              <dt>语音 ID</dt>
+              <dd>{p.voice_id || "（使用全局默认）"}</dd>
             </dl>
             <div className="row gap-sm" style={{ marginTop: 2 }}>
               <button className="btn sm" onClick={() => test(p.id)} disabled={testing === p.id}>

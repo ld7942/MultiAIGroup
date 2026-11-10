@@ -25,6 +25,35 @@ WOLF_HINTS = [
     "注意别把队友刀了，报一下目标。",
 ]
 
+# 角色玩法技能卡：开局随系统提示词注入，相当于每个角色先“调用”自己的玩法。
+ROLE_SKILLS = {
+    "werewolf": """【狼人】目标：消灭所有村民，或消灭所有神职。
+- 白天把自己当成好人来发言，用“找狼逻辑”建立可信度；不要主动提队友。
+- 夜间刀人优先级：预言家 > 女巫 > 猎人 > 村民；不要刀队友；空刀只在有明确战术时使用。
+- 被查杀时二选一：强势反打对跳，或果断与队友切割；不要含糊其辞。
+- 每次狼人密谈都必须发言，给出具体刀人建议与理由。""",
+    "seer": """【预言家】目标：用查验信息带领好人放逐狼人。
+- 验人优先级：发言强势、带节奏、身份不明的人 > 沉默位；不要重复验已知身份。
+- 有查杀时白天要跳身份报验，讲清“第几晚验了谁、结果是什么”。
+- 无查杀时可以隐藏或只给暗示，避免首夜被刀。
+- 报验后必须给出明确的放逐目标和理由。""",
+    "witch": """【女巫】目标：用好解药与毒药，帮助好人阵营。
+- 解药：首夜被刀的是关键神职或高价值玩家时优先救；自己能救则救。
+- 毒药：只在身份概率较高（约 70% 以上）时使用；绝不能毒自己；不毒已明确跳预言家且逻辑成立的人。
+- 同一晚只能用一瓶药；信息不足时宁可不用，留到关键回合。
+- 白天尽量隐藏身份，报药信息要服务于带队。""",
+    "hunter": """【猎人】目标：活着威慑狼人，出局时带走狼人。
+- 白天隐藏身份，避免被狼人针对；发言可以强势，但不要过早暴露猎人。
+- 被投票出局或被狼人击杀时可以开枪，优先带走狼概率最高的人。
+- 不要枪已确认的好人；被女巫毒杀时不能开枪。
+- 没有把握时可以不开枪，避免误伤。""",
+    "villager": """【村民】目标：通过发言与投票帮助好人阵营。
+- 认真表水：说明自己的视角、怀疑对象与投票意向。
+- 优先跟随可信预言家的验人，不要分票。
+- 没有信息时听发言、找逻辑矛盾，不要盲目冲票。
+- 不要空发言；至少给出 2 个具体怀疑点。""",
+}
+
 
 class WerewolfEngine(GameEngine):
     game_id = "werewolf"
@@ -439,9 +468,70 @@ class WerewolfEngine(GameEngine):
         self.stage = next_stage + "_pending"
 
     # ---------------- 动作处理 ----------------
+    @classmethod
+    def skill_cards(cls) -> list[dict]:
+        return [
+            {"role": ROLES[role]["label"], "faction": ROLES[role]["camp"], "text": text}
+            for role, text in ROLE_SKILLS.items()
+        ]
+
+    def tactic_tags(self, seat_id: str) -> dict:
+        role = self.roles.get(seat_id, "")
+        return {
+            "role": ROLES.get(role, {}).get("label", ""),
+            "faction": ROLES.get(role, {}).get("camp", ""),
+        }
+
+    def skill_for(self, seat_id: str) -> str:
+        return ROLE_SKILLS.get(self.roles.get(seat_id, ""), "")
+
+    def action_hint(self, req: ActionRequest, seat_id: str) -> str:
+        kind = req.kind
+        style = self.style_for(seat_id).get("name", "")
+        style_tip = ""
+        if style == "激进":
+            style_tip = "风格偏激进：可以主动带节奏、强推目标。"
+        elif style == "保守":
+            style_tip = "风格偏保守：先保命、少树敌，跟随可信好人。"
+        elif style == "诡诈":
+            style_tip = "风格偏诡诈：可以放烟雾弹、踩队友做身份，但别自相矛盾。"
+        elif style == "理性":
+            style_tip = "风格偏理性：用票型、发言矛盾等具体证据说服别人。"
+        if kind == "werewolf_chat":
+            return f"必须发言，不能空字符串。给出今晚具体刀谁、为什么；优先神职，不要刀队友。{style_tip}"
+        if kind == "werewolf_vote":
+            return "不要空刀（除非有明确战术）；不要投队友；优先预言家、女巫等关键神职。"
+        if kind == "seer_check":
+            return "优先查验发言强势、带节奏或身份不明的人；不要重复查验已经验过的人。"
+        if kind == "witch_action":
+            antidote = "可用" if self.antidote else "已用完"
+            poison = "可用" if self.poison else "已用完"
+            style = self.style_for(seat_id).get("name", "")
+            style_tip = {
+                "激进": "你偏激进：如果怀疑被杀者是狼自刀，可以故意不救。",
+                "保守": "你偏保守：解药优先留给确认的关键神职，救不救由你的判断决定。",
+                "诡诈": "你偏诡诈：不救、假救、留药骗刀都是合理选择。",
+            }.get(style, "救与不救都可以，取决于你对被杀者身份的判断，不必每局都救。")
+            return (
+                f"解药{antidote}，毒药{poison}。毒药目标绝不能是自己；"
+                f"置信度不足约 70% 时宁可不毒；同一晚不能同时使用两瓶药。{style_tip}"
+            )
+        if kind == "day_speech":
+            return (
+                "必须发言。点名至少 2 个怀疑对象，给出具体依据（发言矛盾、票型、夜晚信息），"
+                f"并说明投票意向；禁止空话或只报态度。{style_tip}"
+            )
+        if kind == "day_vote":
+            return f"不要轻易弃票；投给你认为狼概率最高的人；如果票型分散，跟随你最信任的好人。{style_tip}"
+        if kind == "hunter_shot":
+            return "开枪带走狼概率最高的人；不要带已确认的好人；没有把握可以不开枪。"
+        return ""
+
     def validate(self, req: ActionRequest, action: dict) -> None:
         kind = req.kind
         if kind in {"werewolf_chat", "day_speech"}:
+            if not str(action.get("speech") or "").strip():
+                raise ActionError("必须发言：speech 不能为空")
             return
         target = action.get("target")
         if kind in {"werewolf_vote", "day_vote", "seer_check", "hunter_shot"}:
@@ -614,6 +704,24 @@ class WerewolfEngine(GameEngine):
         if role == "witch":
             state["antidote"] = self.antidote
             state["poison"] = self.poison
+        items: list[dict] = []
+        if role == "werewolf":
+            items.append({"key": "wolf_blade", "label": "狼刀", "available": seat_id in self.alive})
+        elif role == "witch":
+            items.append({"key": "antidote", "label": "解药", "available": bool(self.antidote)})
+            items.append({"key": "poison", "label": "毒药", "available": bool(self.poison)})
+        elif role == "hunter":
+            items.append(
+                {
+                    "key": "hunter_shot",
+                    "label": "猎枪（出局时可开枪）",
+                    "available": seat_id in self.alive or seat_id in self.hunter_queue,
+                }
+            )
+        elif role == "seer":
+            items.append({"key": "seer_check", "label": "查验（每夜一次）", "available": seat_id in self.alive})
+        if items:
+            state["items"] = items
         if self.finished:
             state["all_roles"] = {
                 sid: {"role": r, "label": ROLES[r]["label"], "name": self.seat_map[sid].name}
@@ -622,7 +730,20 @@ class WerewolfEngine(GameEngine):
         return state
 
     def fallback_action(self, req: ActionRequest) -> dict:
+        if req.kind == "werewolf_chat":
+            return {"speech": self.rng.choice(WOLF_HINTS)}
+        if req.kind == "day_speech":
+            return {"speech": self.rng.choice(DAY_HINTS)}
         if req.kind == "witch_action":
+            # 女巫不一定救人：兜底时也在“用药 / 不用药”之间随机，并保留少量毒人可能。
+            plain = [o for o in req.options if not o.action.get("poison")]
+            toxic = [o for o in req.options if o.action.get("poison")]
+            style = self.style_for(req.seat_id).get("name", "")
+            poison_rate = 0.25 if style in {"激进", "诡诈"} else 0.08
+            if toxic and self.rng.random() < poison_rate:
+                return dict(self.rng.choice(toxic).action)
+            if plain:
+                return dict(self.rng.choice(plain).action)
             return {"save": False, "poison": None}
         if req.kind == "hunter_shot":
             return {"target": None}
@@ -631,3 +752,6 @@ class WerewolfEngine(GameEngine):
                 return dict(self.rng.choice(req.options).action)
             return {"target": None}
         return super().fallback_action(req)
+
+
+ENGINE = WerewolfEngine

@@ -10,6 +10,7 @@ export interface Provider {
   has_key?: boolean;
   temperature: number;
   max_tokens: number;
+  voice_id?: string;
   extra: Record<string, unknown>;
   created_at?: number;
 }
@@ -41,6 +42,7 @@ export interface MatchSeat {
   model?: string;
   persona: string;
   color: string;
+  voice_id?: string;
 }
 
 export interface MatchSummary {
@@ -109,11 +111,119 @@ export interface AgentLog {
 export interface Group {
   id: string;
   name: string;
-  members: { name: string; provider_id: string; persona?: string }[];
+  members: { name: string; provider_id: string; persona?: string; voice_id?: string }[];
 }
 
 export interface SeatDraft {
   name: string;
   provider_id: string;
   persona: string;
+  voice_id?: string;
+}
+
+export interface VoiceSettings {
+  enabled: boolean;
+  provider: string;
+  default_voice_id: string;
+  narrator_voice_id: string;
+  speed: number;
+  wait_ms: number;
+  voicestudio: {
+    url: string;
+    api_key: string;
+    headers: Record<string, string>;
+    text_field: string;
+    voice_field: string;
+    extra_body: Record<string, unknown>;
+    audio_field: string;
+    audio_url_field: string;
+    timeout_ms: number;
+  };
+}
+
+export interface RagSettings {
+  enabled: boolean;
+  top_k: number;
+  min_score: number;
+  reflect: boolean;
+  llm_reflect: boolean;
+  total?: number;
+}
+
+export interface MemoryItem {
+  id: string;
+  game_id: string;
+  role: string;
+  faction: string;
+  kind: string;
+  text: string;
+  source: string;
+  match_id: string;
+  created_at: number;
+  score?: number;
+}
+
+export interface VoiceDiagnostics {
+  platform: string;
+  provider: string;
+  enabled: boolean;
+  system_tts: {
+    available: boolean;
+    voices: string[];
+    reason: string;
+  };
+  voicestudio_configured: boolean;
+}
+
+export interface OllamaModel {
+  name: string;
+  size?: number;
+}
+
+export interface OllamaModels {
+  ok: boolean;
+  base_url: string;
+  models: OllamaModel[];
+  error?: string;
+}
+
+export interface TrainRecent {
+  index: number;
+  winner: string;
+  rounds: number;
+  seconds: number;
+  error?: string;
+}
+
+export interface TrainStatus {
+  id?: string;
+  status: "idle" | "running" | "finished" | "stopped" | "error";
+  game_id?: string;
+  game_name?: string;
+  total: number;
+  done: number;
+  failed: number;
+  progress: number;
+  winners: Record<string, number>;
+  avg_rounds: number;
+  avg_seconds: number;
+  elapsed: number;
+  lessons: number;
+  recent: TrainRecent[];
+  error: string;
+  config?: Record<string, unknown>;
+}
+
+export interface TrainRequest {
+  game_id: string;
+  provider_id?: string;
+  provider_ids?: string[];
+  games?: number;
+  concurrency?: number;
+  seat_count?: number | null;
+  rag_enabled?: boolean;
+  reflect?: boolean;
+  llm_reflect?: boolean;
+  seed?: number;
+  timeout?: number | null;
 }

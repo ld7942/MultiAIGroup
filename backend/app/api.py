@@ -1,19 +1,25 @@
 """FastAPI 接口层：REST + WebSocket。"""
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .ai import PRESETS, AIClient, config_from_row
 from .engine import Seat
-from .games import ENGINES, create_engine, list_games
+from .plugins import create_engine, get_engine_class, list_games
+from .rag import add_memory, load_rag, save_rag, search as rag_search, seed_skills
 from .runner import RunnerManager
 from .store import Store
+from .training import TrainManager
+from .voice import load_voice, save_voice, voice_diagnostics
 
 SEAT_COLORS = [
     "#7c9cff", "#ff8f6b", "#4fd1a5", "#d38bff", "#ffd166",
@@ -30,6 +36,7 @@ class ProviderIn(BaseModel):
     api_key: str | None = None
     temperature: float = 0.8
     max_tokens: int = 1200
+    voice_id: str = ""
     extra: dict = Field(default_factory=dict)
 
 
@@ -43,12 +50,54 @@ class SeatIn(BaseModel):
     provider_id: str
     persona: str = ""
     color: str | None = None
+    voice_id: str = ""
 
 
 class MatchIn(BaseModel):
     game_id: str
     title: str = ""
     seats: list[SeatIn]
+    config: dict = Field(default_factory=dict)
+
+
+class VoiceIn(BaseModel):
+    enabled: bool | None = None
+    provider: str | None = None
+    default_voice_id: str | None = None
+    narrator_voice_id: str | None = None
+    speed: float | None = None
+    wait_ms: int | None = None
+    voicestudio: dict | None = None
+
+
+class RagIn(BaseModel):
+    enabled: bool | None = None
+    top_k: int | None = None
+    min_score: float | None = None
+    reflect: bool | None = None
+    llm_reflect: bool | None = None
+
+
+class MemoryIn(BaseModel):
+    text: str
+    game_id: str = ""
+    role: str = ""
+    faction: str = ""
+    kind: str = "manual"
+
+
+class TrainIn(BaseModel):
+    game_id: str
+    provider_id: str = ""
+    provider_ids: list[str] = Field(default_factory=list)
+    games: int = 20
+    concurrency: int = 1
+    seat_count: int | None = None
+    rag_enabled: bool = True
+    reflect: bool = True
+    llm_reflect: bool = False
+    seed: int = 0
+    timeout: float | None = None
     config: dict = Field(default_factory=dict)
 
 
@@ -62,6 +111,9 @@ class Hub:
     def leave(self, channel: str, ws: WebSocket) -> None:
         self.channels.get(channel, set()).discard(ws)
 
+    def count(self, channel: str) -> int:
+        return len(self.channels.get(channel, set()))
+
     async def send(self, channel: str, payload: dict) -> None:
         dead = []
         for ws in list(self.channels.get(channel, set())):
@@ -71,6 +123,36 @@ class Hub:
                 dead.append(ws)
         for ws in dead:
             self.leave(channel, ws)
+
+
+class SpeechAcks:
+    """等待前端播完语音后回执 speech_done，用于“读完再轮到下一个人”。"""
+
+    def __init__(self) -> None:
+        self._futures: dict[str, asyncio.Future] = {}
+
+    def prepare(self, speech_id: str) -> None:
+        # 必须在广播前注册，避免回执先于等待到达。
+        old = self._futures.get(speech_id)
+        if old and not old.done():
+            old.cancel()
+        self._futures[speech_id] = asyncio.get_running_loop().create_future()
+
+    def done(self, speech_id: str) -> None:
+        future = self._futures.get(speech_id)
+        if future and not future.done():
+            future.set_result(True)
+
+    async def wait(self, speech_id: str, timeout: float) -> None:
+        future = self._futures.get(speech_id)
+        if future is None:
+            return
+        try:
+            await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            self._futures.pop(speech_id, None)
 
 
 def _build_seats(match: dict, store: Store) -> tuple[list[Seat], dict[str, AIClient]]:
@@ -86,6 +168,8 @@ def _build_seats(match: dict, store: Store) -> tuple[list[Seat], dict[str, AICli
             provider_name=provider["name"] if provider else "未知 Provider",
             model=provider["model"] if provider else "",
             color=item.get("color") or SEAT_COLORS[idx % len(SEAT_COLORS)],
+            # 座位语音优先，其次 Provider 默认音色。
+            voice_id=item.get("voice_id") or (provider.get("voice_id", "") if provider else ""),
         )
         seats.append(seat)
         if provider:
@@ -96,15 +180,28 @@ def _build_seats(match: dict, store: Store) -> tuple[list[Seat], dict[str, AICli
 def create_app(db: Path | None = None) -> FastAPI:
     store = Store(db)
     hub = Hub()
+    try:
+        seed_skills(store)
+    except Exception:
+        pass
+
+    acks = SpeechAcks()
 
     async def broadcast(payload: dict) -> None:
         await hub.send(str(payload.get("match_id") or "lobby"), payload)
 
-    manager = RunnerManager(store, broadcast)
+    manager = RunnerManager(
+        store,
+        broadcast,
+        acks=acks,
+        has_clients=lambda match_id: hub.count(match_id) > 0,
+    )
+    trainer = TrainManager(store)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
+        await trainer.stop()
         await manager.shutdown()
 
     app = FastAPI(title="MultiAIGroup", version="0.1.0", lifespan=lifespan)
@@ -117,6 +214,7 @@ def create_app(db: Path | None = None) -> FastAPI:
     app.state.store = store
     app.state.hub = hub
     app.state.manager = manager
+    app.state.trainer = trainer
 
     # ---------------- 基础 ----------------
     @app.get("/api/health")
@@ -130,6 +228,125 @@ def create_app(db: Path | None = None) -> FastAPI:
     @app.get("/api/games")
     def games() -> list[dict]:
         return list_games()
+
+    # ---------------- 语音 ----------------
+    @app.get("/api/voice")
+    def get_voice() -> dict:
+        return load_voice(store)
+
+    @app.put("/api/voice")
+    def put_voice(payload: VoiceIn) -> dict:
+        return save_voice(store, payload.model_dump(exclude_none=True))
+
+    @app.get("/api/voice/diagnostics")
+    async def voice_check() -> dict:
+        return await voice_diagnostics(load_voice(store))
+
+    # ---------------- 训练场 / Ollama ----------------
+    @app.post("/api/train/start")
+    async def train_start(payload: TrainIn) -> dict:
+        try:
+            return await trainer.start(payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/train/status")
+    def train_status() -> dict:
+        return trainer.status()
+
+    @app.post("/api/train/stop")
+    async def train_stop() -> dict:
+        return await trainer.stop()
+
+    @app.get("/api/ollama/models")
+    async def ollama_models(base_url: str = "http://127.0.0.1:11434") -> dict:
+        base = (base_url or "http://127.0.0.1:11434").rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        try:
+            async with httpx.AsyncClient(timeout=6) as client:
+                resp = await client.get(f"{base}/api/tags")
+                resp.raise_for_status()
+                data = resp.json()
+            models = [
+                {
+                    "name": item.get("name") or item.get("model") or "",
+                    "size": item.get("size") or 0,
+                }
+                for item in (data.get("models") or [])
+                if item.get("name") or item.get("model")
+            ]
+            return {"ok": True, "base_url": base, "models": models}
+        except Exception as exc:
+            return {"ok": False, "base_url": base, "models": [], "error": f"{type(exc).__name__}: {exc}"}
+
+    # ---------------- RAG 记忆库 ----------------
+    @app.get("/api/rag")
+    def get_rag() -> dict:
+        cfg = load_rag(store)
+        return {**cfg, "total": store.count_memories()}
+
+    @app.put("/api/rag")
+    def put_rag(payload: RagIn) -> dict:
+        cfg = save_rag(store, payload.model_dump(exclude_none=True))
+        return {**cfg, "total": store.count_memories()}
+
+    @app.get("/api/rag/memories")
+    def list_memories(
+        game_id: str | None = None,
+        role: str | None = None,
+        kind: str | None = None,
+        limit: int = 300,
+    ) -> list[dict]:
+        items = store.list_memories(game_id, role, kind, max(1, min(limit, 1000)))
+        for item in items:
+            item.pop("embedding", None)
+        return items
+
+    @app.post("/api/rag/memories")
+    def create_memory(payload: MemoryIn) -> dict:
+        if not payload.text.strip():
+            raise HTTPException(400, "记忆内容不能为空")
+        item = add_memory(
+            store,
+            payload.text,
+            game_id=payload.game_id,
+            role=payload.role,
+            faction=payload.faction,
+            kind=payload.kind or "manual",
+            source="manual",
+        )
+        item.pop("embedding", None)
+        return item
+
+    @app.delete("/api/rag/memories/{memory_id}")
+    def delete_memory(memory_id: str) -> dict:
+        store.delete_memory(memory_id)
+        return {"ok": True}
+
+    @app.post("/api/rag/seed")
+    def seed() -> dict:
+        added = seed_skills(store)
+        return {"ok": True, "added": added, "total": store.count_memories()}
+
+    @app.get("/api/rag/search")
+    def search_memories(
+        q: str,
+        game_id: str | None = None,
+        role: str | None = None,
+        top_k: int = 8,
+    ) -> list[dict]:
+        items = rag_search(
+            store,
+            q,
+            game_id=game_id or "",
+            role=role or "",
+            top_k=max(1, min(top_k, 30)),
+            min_score=0.0,
+        )
+        for item in items:
+            item.pop("embedding", None)
+        return items
 
     # ---------------- Provider ----------------
     @app.get("/api/providers")
@@ -200,9 +417,9 @@ def create_app(db: Path | None = None) -> FastAPI:
 
     @app.post("/api/matches")
     def create_match(payload: MatchIn) -> dict:
-        if payload.game_id not in ENGINES:
+        engine_cls = get_engine_class(payload.game_id)
+        if engine_cls is None:
             raise HTTPException(400, f"未知游戏 {payload.game_id}")
-        engine_cls = ENGINES[payload.game_id]
         count = len(payload.seats)
         allowed = engine_cls.allowed_counts
         if allowed and count not in allowed:
@@ -224,6 +441,7 @@ def create_app(db: Path | None = None) -> FastAPI:
                     "model": provider["model"],
                     "persona": seat.persona,
                     "color": seat.color or SEAT_COLORS[idx % len(SEAT_COLORS)],
+                    "voice_id": seat.voice_id or provider.get("voice_id", ""),
                 }
             )
         title = payload.title.strip() or f"{engine_cls.name} · {time.strftime('%m-%d %H:%M')}"
@@ -323,6 +541,7 @@ def create_app(db: Path | None = None) -> FastAPI:
                     "match": {k: match[k] for k in ("id", "game_id", "title", "seats", "config", "result")},
                     "state": snapshot,
                     "privates": privates,
+                    "reads": runner.reads if runner else {},
                     "events": store.get_events(match_id),
                 }
             )
@@ -330,6 +549,18 @@ def create_app(db: Path | None = None) -> FastAPI:
                 message = await ws.receive_text()
                 if message == "ping":
                     await ws.send_json({"type": "pong", "time": time.time()})
+                    continue
+                try:
+                    data = json.loads(message)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(data, dict) and data.get("type") == "speech_done":
+                    acks.done(str(data.get("speech_id") or ""))
+                elif isinstance(data, dict) and data.get("type") == "voice_fallback":
+                    # 前端没有浏览器语音引擎（常见于桌面 WebView2），本局改用系统 TTS。
+                    runner = manager.get(match_id)
+                    if runner is not None and (runner.voice.get("provider") or "browser") == "browser":
+                        runner.voice_provider = "system"
         except WebSocketDisconnect:
             pass
         finally:

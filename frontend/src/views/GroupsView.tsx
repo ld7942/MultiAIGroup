@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import VoicePicker from "../VoicePicker";
 import { api } from "../api";
 import type { Group, Provider } from "../types";
 
@@ -6,6 +7,7 @@ interface Member {
   name: string;
   provider_id: string;
   persona: string;
+  voice_id: string;
 }
 
 export default function GroupsView() {
@@ -13,9 +15,9 @@ export default function GroupsView() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [name, setName] = useState("我的 AI 群组");
   const [members, setMembers] = useState<Member[]>([
-    { name: "AI 1", provider_id: "", persona: "" },
-    { name: "AI 2", provider_id: "", persona: "" },
-    { name: "AI 3", provider_id: "", persona: "" },
+    { name: "AI 1", provider_id: "", persona: "", voice_id: "" },
+    { name: "AI 2", provider_id: "", persona: "", voice_id: "" },
+    { name: "AI 3", provider_id: "", persona: "", voice_id: "" },
   ]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -44,7 +46,7 @@ export default function GroupsView() {
   const addMember = () =>
     setMembers((prev) => [
       ...prev,
-      { name: `AI ${prev.length + 1}`, provider_id: providers[0]?.id || "", persona: "" },
+      { name: `AI ${prev.length + 1}`, provider_id: providers[0]?.id || "", persona: "", voice_id: "" },
     ]);
 
   const removeMember = (index: number) =>
@@ -99,7 +101,7 @@ export default function GroupsView() {
           </label>
           <div className="seat-editor">
             {members.map((member, index) => (
-              <div className="seat-row" key={index} style={{ gridTemplateColumns: "30px minmax(0,1fr) minmax(130px,1.2fr) minmax(0,1.4fr) 30px" }}>
+              <div className="seat-row" key={index} style={{ gridTemplateColumns: "30px minmax(0,0.9fr) minmax(120px,1fr) minmax(0,1.1fr) minmax(0,0.8fr) 30px" }}>
                 <div className="seat-badge" style={{ background: "#2b3245", color: "var(--muted)" }}>{index + 1}</div>
                 <input value={member.name} onChange={(e) => patch(index, { name: e.target.value })} placeholder={`AI ${index + 1}`} />
                 <select value={member.provider_id} onChange={(e) => patch(index, { provider_id: e.target.value })}>
@@ -109,6 +111,12 @@ export default function GroupsView() {
                   ))}
                 </select>
                 <input value={member.persona} onChange={(e) => patch(index, { persona: e.target.value })} placeholder="人设（可选）" />
+                <VoicePicker
+                  value={member.voice_id}
+                  onChange={(value) => patch(index, { voice_id: value })}
+                  placeholder="语音（可选）"
+                  title="留空使用 Provider 默认音色"
+                />
                 <button className="btn sm ghost" onClick={() => removeMember(index)} title="移除">×</button>
               </div>
             ))}

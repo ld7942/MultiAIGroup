@@ -4,8 +4,11 @@ import LobbyView from "./views/LobbyView";
 import ProvidersView from "./views/ProvidersView";
 import GroupsView from "./views/GroupsView";
 import TableView from "./views/TableView";
+import VoiceView from "./views/VoiceView";
+import MemoryView from "./views/MemoryView";
+import TrainView from "./views/TrainView";
 
-type View = "lobby" | "providers" | "groups" | "table";
+type View = "lobby" | "providers" | "groups" | "voice" | "memory" | "train" | "table";
 
 export default function App() {
   const [view, setView] = useState<View>("lobby");
@@ -67,6 +70,27 @@ export default function App() {
             <span className="nav-icon">✦</span>
             <span>AI 群组</span>
           </button>
+          <button
+            className={`nav-item ${view === "voice" ? "active" : ""}`}
+            onClick={() => setView("voice")}
+          >
+            <span className="nav-icon">🔊</span>
+            <span>语音朗读</span>
+          </button>
+          <button
+            className={`nav-item ${view === "memory" ? "active" : ""}`}
+            onClick={() => setView("memory")}
+          >
+            <span className="nav-icon">🧠</span>
+            <span>AI 记忆库</span>
+          </button>
+          <button
+            className={`nav-item ${view === "train" ? "active" : ""}`}
+            onClick={() => setView("train")}
+          >
+            <span className="nav-icon">🏋</span>
+            <span>训练场</span>
+          </button>
         </nav>
         <div className="sidebar-foot">
           <div className="health">
@@ -83,6 +107,9 @@ export default function App() {
         )}
         {view === "providers" && <ProvidersView />}
         {view === "groups" && <GroupsView />}
+        {view === "voice" && <VoiceView />}
+        {view === "memory" && <MemoryView />}
+        {view === "train" && <TrainView />}
         {view === "table" && matchId && (
           <TableView matchId={matchId} onBack={() => setView("lobby")} />
         )}

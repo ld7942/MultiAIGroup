@@ -124,6 +124,7 @@ class Seat:
     provider_name: str = ""
     model: str = ""
     color: str = "#7c9cff"
+    voice_id: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -134,6 +135,7 @@ class Seat:
             "model": self.model,
             "persona": self.persona,
             "color": self.color,
+            "voice_id": self.voice_id,
         }
 
 
@@ -147,11 +149,26 @@ class GameEngine(ABC):
     rules: str = ""
     presets: list[dict] = []
 
+    # 每局为每个座位随机分配一种性格，避免所有 AI 用同一套固定套路。
+    STYLES: list[dict] = [
+        {"id": "aggressive", "name": "激进", "prompt": "你偏向主动进攻、抢节奏，愿意为了收益承担风险；但不要做明显送死或违反规则的举动。"},
+        {"id": "steady", "name": "稳健", "prompt": "你偏向稳健与长期收益，先保证不犯错，再寻找确定性机会；避免情绪化操作。"},
+        {"id": "cautious", "name": "保守", "prompt": "你偏向保守，优先自保与保留关键资源；只有在把握很大时才投入。"},
+        {"id": "deceptive", "name": "诡诈", "prompt": "你偏向欺骗与试探，喜欢用模糊发言、假动作和节奏变化制造误判；注意不要自相矛盾。"},
+        {"id": "analytic", "name": "理性", "prompt": "你偏向冷静计算，用概率与证据说话，偏好期望收益最高的动作；发言条理清晰。"},
+        {"id": "intuitive", "name": "直觉", "prompt": "你偏向凭现场感觉与气势做判断，敢在信息不足时下注；但要用具体观察解释直觉。"},
+    ]
+
     def __init__(self, seats: list[Seat], config: dict | None = None, rng: random.Random | None = None):
         self.seats = seats
         self.seat_map = {s.id: s for s in seats}
         self.config = config or {}
         self.rng = rng or random.Random()
+        # 性格使用独立随机源，不扰动牌局 / 身份的随机序列。
+        style_rng = random.Random()
+        self.styles: dict[str, dict] = {
+            s.id: style_rng.choice(self.STYLES) for s in seats
+        }
         self.round = 0
         self.phase = "准备"
         self.finished = False
@@ -302,6 +319,42 @@ class GameEngine(ABC):
 
     def legal_actions(self, req: ActionRequest) -> list[dict]:
         return [dict(o.action) for o in req.options]
+
+    # ---------- 玩法提示（供编排器组装提示词） ----------
+    @classmethod
+    def skill_cards(cls) -> list[dict]:
+        """静态角色玩法卡片，供 RAG 记忆库在启动时入库。
+
+        返回 ``[{"role": 角色, "faction": 阵营, "text": 技能卡}]``。
+        与 ``skill_for`` 的区别：这里不依赖具体对局实例，可被 API / 启动流程调用。
+        """
+        return []
+
+    def skill_for(self, seat_id: str) -> str:
+        """该座位的角色玩法技能卡；子类按角色返回。"""
+        return ""
+
+    def style_for(self, seat_id: str) -> dict:
+        """该座位本局随机分配的性格（name / prompt），供提示词与策略提示使用。"""
+        return self.styles.get(seat_id) or {}
+
+    def tactic_tags(self, seat_id: str) -> dict:
+        """该座位用于 RAG 检索的标签：``{"role": 角色, "faction": 阵营}``。"""
+        return {}
+
+    def action_hint(self, req: ActionRequest, seat_id: str) -> str:
+        """当前动作的即时策略检查；子类可结合局势返回。"""
+        return ""
+
+    def decision_protocol(self) -> str:
+        return (
+            "【决策流程】把下面的步骤写进 plan，再给出最终 action：\n"
+            "1. 盘点信息：结合私有信息与历史事件，更新对每个玩家的身份概率。\n"
+            "2. 选择姿态 stance：support（顺势/隐藏）、attack（进攻/施压）、neutral（观察）。\n"
+            "3. 生成候选：列出 1-3 个合法动作，比较收益、风险与暴露代价。\n"
+            "4. 安全自检：目标是否合法？会不会误伤自己或队友？会不会暴露关键身份？是否违反角色禁忌？\n"
+            "5. 只输出一个最终 action，并说明理由。"
+        )
 
     # ---------- 工具 ----------
     def finish(self, winner: str, reason: str, summary: dict | None = None) -> None:

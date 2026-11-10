@@ -194,6 +194,23 @@ def enumerate_plays(hand: list[dict]) -> list[dict]:
     return list(unique.values())
 
 
+BID_SKILL = """【叫地主】先评价手牌强度：有王、2 多、炸弹或长顺子可以叫高分；牌散、缺大牌则不叫。
+- 叫分必须高于当前最高分；不确定时叫 1 分试探。
+- 不要为了抢地主而叫超过手牌承受能力的分。"""
+
+LANDLORD_SKILL = """【地主】目标：先出完手牌。
+- 主动控场：优先走小牌和单张，保留 2、王、炸弹应对关键回合。
+- 记牌：关注两位农民已经出过的大牌，判断自己的牌是否最大。
+- 不要为了压一手小牌拆散对子、顺子或飞机；能一次走多张就一次走。
+- 农民手牌少时要果断拦截，必要时用炸弹。"""
+
+FARMER_SKILL = """【农民】目标：配合队友，让任意一个农民先出完。
+- 队友出牌时尽量过牌，不要压队友；只有能直接走完或必须压制地主时才接。
+- 地主手牌少时必须拦截，优先出能压制地主的最小牌型。
+- 记住队友出过什么，尽量给队友创造走牌机会。
+- 炸弹留给地主即将走完或队友需要接力的关键回合。"""
+
+
 class DoudizhuEngine(GameEngine):
     game_id = "doudizhu"
     name = "斗地主"
@@ -373,6 +390,58 @@ class DoudizhuEngine(GameEngine):
             meta={"hand_count": len(hand), "last": last["cards"] if last else []},
         )
 
+    # ---------------- 玩法提示 ----------------
+    @classmethod
+    def skill_cards(cls) -> list[dict]:
+        return [
+            {"role": "叫地主", "faction": "", "text": BID_SKILL},
+            {"role": "地主", "faction": "", "text": LANDLORD_SKILL},
+            {"role": "农民", "faction": "", "text": FARMER_SKILL},
+        ]
+
+    def tactic_tags(self, seat_id: str) -> dict:
+        if not self.landlord:
+            return {"role": "叫地主", "faction": ""}
+        return {"role": "地主" if seat_id == self.landlord else "农民", "faction": ""}
+
+    def skill_for(self, seat_id: str) -> str:
+        if not self.landlord:
+            return BID_SKILL
+        return LANDLORD_SKILL if seat_id == self.landlord else FARMER_SKILL
+
+    def action_hint(self, req: ActionRequest, seat_id: str) -> str:
+        style = self.style_for(seat_id).get("name", "")
+        style_tip = {
+            "激进": "你的风格偏激进：牌型不差时可以抢高分、主动压制。",
+            "保守": "你的风格偏保守：牌散或缺少大牌时果断不叫、优先过牌。",
+            "诡诈": "你的风格偏诡诈：可以用叫分和出牌节奏误导对手。",
+            "理性": "你的风格偏理性：按手牌强度与剩余牌数计算收益，不情绪化。",
+        }.get(style, "")
+        if req.kind == "bid":
+            return f"根据手牌强度决定叫分：有王/2/炸弹/长顺子可叫高，牌散或缺少大牌就不叫。{style_tip}"
+        if req.kind == "play_cards":
+            tips = ["优先出能压制上家的最小牌型，不要轻易拆散对子、顺子或飞机。"]
+            last = self.last_play
+            if last and self.last_player and self.landlord:
+                last_seat = self.last_player
+                teammate = (
+                    seat_id != self.landlord
+                    and last_seat != self.landlord
+                    and last_seat != seat_id
+                )
+                if teammate:
+                    tips.append("上家是你的农民队友：除非能直接走完或必须压制地主，否则优先过牌。")
+                landlord_cards = len(self.hands.get(self.landlord, []))
+                if seat_id != self.landlord and landlord_cards <= 5:
+                    tips.append(f"地主只剩 {landlord_cards} 张牌，必须尽量拦截，必要时用炸弹。")
+            elif self.landlord and seat_id == self.landlord:
+                tips.append("你是地主，目标是尽快走完；保留 2、王和炸弹应对关键回合。")
+            tips.append("炸弹留给地主即将走完或队友需要接力的关键回合。")
+            if style_tip:
+                tips.append(style_tip)
+            return " ".join(tips)
+        return ""
+
     # ---------------- 动作 ----------------
     def validate(self, req: ActionRequest, action: dict) -> None:
         if req.kind == "bid":
@@ -430,14 +499,16 @@ class DoudizhuEngine(GameEngine):
                 self.current_bid = bid
                 self.highest_bidder = req.seat_id
             label = "不叫" if bid == 0 else f"叫 {bid} 分"
-            self.emit("bid", f"{self.seat_map[req.seat_id].name} {label}。", seat_id=req.seat_id, bid=bid)
+            # 先聊天，再播报叫分，语音会按这个顺序朗读。
             self.say(req.seat_id, str(action.get("speech") or "").strip())
+            self.emit("bid", f"{self.seat_map[req.seat_id].name} {label}。", seat_id=req.seat_id, bid=bid)
             if bid == 3:
                 self.bid_queue = []
             return
         if req.kind == "play_cards":
             if action.get("pass") is True or action.get("action") == "pass":
                 self.passes += 1
+                self.say(req.seat_id, str(action.get("speech") or "").strip())
                 self.emit("pass", f"{self.seat_map[req.seat_id].name} 过牌。", seat_id=req.seat_id)
                 if self.passes >= 2 and self.last_player:
                     leader = self.last_player
@@ -463,6 +534,8 @@ class DoudizhuEngine(GameEngine):
             }
             self.last_player = req.seat_id
             self.passes = 0
+            # 先聊天，再播报出的牌。
+            self.say(req.seat_id, str(action.get("speech") or "").strip())
             self.emit(
                 "play",
                 f"{self.seat_map[req.seat_id].name} 出牌：{' '.join(c['label'] for c in cards)}（{info['kind']}）",
@@ -471,7 +544,6 @@ class DoudizhuEngine(GameEngine):
                 labels=[c["label"] for c in cards],
                 kind=info["kind"],
             )
-            self.say(req.seat_id, str(action.get("speech") or "").strip())
             if not self.hands[req.seat_id]:
                 if req.seat_id == self.landlord:
                     self.finish("地主", f"地主 {self.seat_map[req.seat_id].name} 出完手牌", {"landlord": self.landlord})
@@ -529,12 +601,26 @@ class DoudizhuEngine(GameEngine):
         return state
 
     def fallback_action(self, req: ActionRequest) -> dict:
+        style = self.style_for(req.seat_id).get("name", "")
         if req.kind == "bid":
-            return {"bid": 0}
+            options = req.options
+            if not options:
+                return {"bid": 0}
+            if style in {"保守", "稳健"}:
+                return {"bid": 0}
+            if style == "激进":
+                return dict(max(options, key=lambda o: int(o.action.get("bid") or 0)).action)
+            return dict(self.rng.choice(options).action)
         if req.kind == "play_cards":
-            for option in req.options:
-                if option.action.get("pass"):
-                    return dict(option.action)
+            passes = [o for o in req.options if o.action.get("pass")]
+            plays = [o for o in req.options if not o.action.get("pass")]
+            if plays and (not passes or style in {"激进", "直觉"} or self.rng.random() < 0.5):
+                return dict(self.rng.choice(plays).action)
+            if passes:
+                return dict(passes[0].action)
             if req.options:
                 return dict(req.options[0].action)
         return super().fallback_action(req)
+
+
+ENGINE = DoudizhuEngine

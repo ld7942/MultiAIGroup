@@ -5,8 +5,8 @@ import pytest
 
 from app.ai import AIClient, config_from_row
 from app.engine import Seat
-from app.games import ENGINES, create_engine
-from app.games.doudizhu import analyze, beats, make_card
+from app.plugins import ENGINES, create_engine
+from app.plugins.doudizhu import analyze, beats, make_card
 from app.runner import GameRunner
 from app.store import Store
 

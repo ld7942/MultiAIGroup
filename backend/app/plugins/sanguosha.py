@@ -15,6 +15,30 @@ CARD_LABEL = {
 CARD_COUNT = {"slash": 24, "dodge": 16, "peach": 10, "exnihilo": 6, "dismantle": 6, "duel": 4}
 
 
+IDENTITY_SKILLS = {
+    "lord": """【主公】目标：消灭所有反贼与内奸，并保证自己存活。
+- 保守出牌，优先保留【闪】和【桃】；不要为了压血线把自己暴露在集火下。
+- 优先攻击明确跳反或威胁最高的反贼，避免误伤忠臣。
+- 内奸通常后期才会暴露，前期不要盲目把内奸当自己人。
+- 手牌和体力是主公的生命线，残血时优先回复。""",
+    "loyal": """【忠臣】目标：保护主公，帮助主公消灭反贼与内奸。
+- 优先攻击反贼；不要盲打身份不明的人，避免误伤主公或队友。
+- 主公残血时优先帮忙压制反贼，必要时替主公吸引火力。
+- 【桃】优先留给主公或自己濒死时使用。
+- 不要过早暴露全部身份，避免被反贼集火。""",
+    "rebel": """【反贼】目标：击杀主公。
+- 集火主公，优先使用【杀】和【决斗】压低主公体力。
+- 身份未暴露时可以适当装忠，避免被主公阵营集火。
+- 不要浪费输出在忠臣身上，除非能打开局面。
+- 保留【闪】防止主公阵营反打。""",
+    "spy": """【内奸】目标：先帮助主公消灭反贼，再成为最后唯一存活者。
+- 前期帮主公清反贼，但不要过度暴露；保持场上双方平衡。
+- 后期控制主公与忠臣的血线，选择合适时机收尾。
+- 不要过早跳反，也不要让反贼过快被清光。
+- 优先保证自己存活，必要时留【桃】和【闪】。""",
+}
+
+
 class SanguoshaEngine(GameEngine):
     game_id = "sanguosha"
     name = "三国杀"
@@ -323,6 +347,55 @@ class SanguoshaEngine(GameEngine):
                 return
         self._check_win()
 
+    # ---------------- 玩法提示 ----------------
+    @classmethod
+    def skill_cards(cls) -> list[dict]:
+        return [
+            {"role": ROLE_LABEL[role], "faction": ROLE_CAMP[role], "text": text}
+            for role, text in IDENTITY_SKILLS.items()
+        ]
+
+    def tactic_tags(self, seat_id: str) -> dict:
+        role = self.roles.get(seat_id, "")
+        return {
+            "role": ROLE_LABEL.get(role, ""),
+            "faction": ROLE_CAMP.get(role, ""),
+        }
+
+    def skill_for(self, seat_id: str) -> str:
+        return IDENTITY_SKILLS.get(self.roles.get(seat_id, ""), "")
+
+    def action_hint(self, req: ActionRequest, seat_id: str) -> str:
+        role = self.roles.get(seat_id, "")
+        style = self.style_for(seat_id).get("name", "")
+        style_tip = {
+            "激进": "你的风格偏激进：有把握时果断出杀、抢输出。",
+            "保守": "你的风格偏保守：优先留【闪】【桃】，不做高风险交换。",
+            "诡诈": "你的风格偏诡诈：可以藏牌、示弱，诱导对手误判。",
+            "理性": "你的风格偏理性：按身份与血量计算收益，优先处理威胁最大的目标。",
+        }.get(style, "")
+        if req.kind == "sgs_play":
+            tips = [
+                "先用【无中生有】积累手牌，再用【过河拆桥】破坏关键目标；每回合最多使用 1 张【杀】。",
+                "【桃】优先留给自己或主公濒死时使用；不要把输出浪费在队友身上。",
+            ]
+            if role in {"lord", "loyal"}:
+                tips.append("优先攻击明确跳反或威胁最高的反贼，避免误伤忠臣。")
+            elif role == "rebel":
+                tips.append("集火主公；身份未暴露时可以适当装忠。")
+            elif role == "spy":
+                tips.append("保持主公与反贼的平衡，不要过早暴露内奸身份。")
+            if style_tip:
+                tips.append(style_tip)
+            return " ".join(tips)
+        if req.kind == "sgs_dodge":
+            return "有【闪】必出；没有【闪】只能承受伤害。"
+        if req.kind == "sgs_duel":
+            return "有【杀】就出；如果要保留杀用于关键输出，先评估本轮风险。"
+        if req.kind == "sgs_dying":
+            return "有【桃】必自救；存活优先。"
+        return ""
+
     # ---------------- 动作 ----------------
     def validate(self, req: ActionRequest, action: dict) -> None:
         if req.kind == "sgs_play":
@@ -367,6 +440,8 @@ class SanguoshaEngine(GameEngine):
             self.hand[req.seat_id] = [c for c in self.hand[req.seat_id] if c["id"] != card_id]
             self.discard.append(card)
             ctype = card["type"]
+            # 先聊天，再播报使用的牌。
+            self.say(req.seat_id, str(action.get("speech") or "").strip())
             if ctype == "slash":
                 self.slash_used = True
                 self.pending = {"source": req.seat_id, "target": target}
@@ -404,7 +479,6 @@ class SanguoshaEngine(GameEngine):
                 self.pending = {"source": req.seat_id, "target": target}
                 self.emit("use_card", f"{self.seat_map[req.seat_id].name} 对 {self.seat_map[target].name} 使用【决斗】。", seat_id=req.seat_id, target=target, card=card["label"])
                 self.stage = "duel"
-            self.say(req.seat_id, str(action.get("speech") or "").strip())
             return
         if req.kind == "sgs_dodge":
             target = req.seat_id
@@ -598,8 +672,23 @@ class SanguoshaEngine(GameEngine):
         return state
 
     def fallback_action(self, req: ActionRequest) -> dict:
+        style = self.style_for(req.seat_id).get("name", "")
         if req.kind == "sgs_play":
+            plays = [o for o in req.options if o.action.get("action") != "end"]
+            if plays and (style in {"激进", "直觉"} or self.rng.random() < 0.5):
+                return dict(self.rng.choice(plays).action)
             return {"action": "end"}
-        if req.kind in {"sgs_dodge", "sgs_duel", "sgs_dying"}:
+        if req.kind == "sgs_dying":
+            heals = [o for o in req.options if o.action.get("use") is True]
+            return dict(heals[0].action) if heals else {"use": False}
+        if req.kind in {"sgs_dodge", "sgs_duel"}:
+            uses = [o for o in req.options if o.action.get("use") is True]
+            # 保守性格更愿意留牌，激进/直觉更愿意响应。
+            chance = 0.65 if style in {"保守", "诡诈"} else 0.9
+            if uses and self.rng.random() < chance:
+                return dict(self.rng.choice(uses).action)
             return {"use": False}
         return super().fallback_action(req)
+
+
+ENGINE = SanguoshaEngine

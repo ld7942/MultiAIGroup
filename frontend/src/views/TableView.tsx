@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, WS_BASE } from "../api";
+import { isTauri, playVoice, speechStatus, speechSupported, unlockSpeech } from "../speech";
 import type {
   AgentLog,
   GameEvent,
@@ -42,6 +43,12 @@ const STATUS_LABEL: Record<string, string> = {
   error: "异常",
 };
 
+const GAME_LABELS: Record<string, string> = {
+  werewolf: "狼人杀",
+  doudizhu: "斗地主",
+  sanguosha: "三国杀",
+};
+
 const KEY_LABELS: Record<string, string> = {
   role: "身份",
   role_label: "身份",
@@ -64,6 +71,35 @@ const KEY_LABELS: Record<string, string> = {
   max_hp: "体力上限",
   lord: "主公",
   reads: "身份预测",
+  game: "游戏",
+  round: "回合",
+  phase: "阶段",
+  stage: "阶段",
+  day: "天数",
+  alive_count: "存活人数",
+  last_night: "昨夜结果",
+  deaths: "死亡",
+  saved: "已使用解药",
+  killed: "被袭击",
+  last_play: "最近出牌",
+  current_bid: "当前叫分",
+  bids: "叫分记录",
+  bid: "叫分",
+  turn: "当前回合",
+  seat: "座位",
+  cards: "牌",
+  labels: "牌面",
+  kind: "牌型",
+  rank: "大小",
+  length: "张数",
+  check: "查验",
+  result: "结果",
+  target: "目标",
+  source: "来源",
+  action: "动作",
+  text: "内容",
+  user: "使用者",
+  card: "卡牌",
 };
 
 const EVENT_ICONS: Record<string, string> = {
@@ -114,79 +150,147 @@ function CardChips({ cards }: { cards: any[] }) {
   );
 }
 
-function DetailRows({ rows }: { rows: { title: string; tags: string[] }[] }) {
-  if (!rows.length) return <span className="muted small">无</span>;
+const MAX_VALUE_DEPTH = 3;
+
+function scalarText(value: any, key: string, names: Record<string, string>): string {
+  if (typeof value === "boolean") return `${KEY_LABELS[key] || key}:${value ? "是" : "否"}`;
+  const text = String(value);
+  return `${KEY_LABELS[key] || key}:${names[text] || text}`;
+}
+
+/** 数组里的对象做紧凑摘要，绝不把原始 JSON 直接丢给用户。 */
+function ObjectSummary({ data, names }: { data: Record<string, any>; names: Record<string, string> }) {
+  const chips = Object.entries(data)
+    .filter(([key, value]) => !["id", "name", "color", "seat", "seat_no"].includes(key))
+    .map(([key, value]) => {
+      if (value === null || value === undefined || value === "") return null;
+      if (typeof value === "object") {
+        if (Array.isArray(value)) {
+          const parts = value.map((item) =>
+            item && typeof item === "object"
+              ? String(item.name || item.label || item.role || "对象")
+              : names[String(item)] || String(item),
+          );
+          return <span className="chip" key={key}>{KEY_LABELS[key] || key}:{parts.join(" / ") || "无"}</span>;
+        }
+        return null;
+      }
+      return <span className="chip" key={key}>{scalarText(value, key, names)}</span>;
+    })
+    .filter(Boolean);
+  if (!chips.length) return <span className="muted small">—</span>;
+  return <div className="tag-list">{chips}</div>;
+}
+
+function ObjectView({ data, names, depth }: { data: Record<string, any>; names: Record<string, string>; depth: number }) {
+  const entries = Object.entries(data).filter(([key, value]) => {
+    if (value === undefined) return false;
+    // 出牌记录同时有 cards(内部 id) 和 labels(牌面)，只展示牌面。
+    if (key === "cards" && Array.isArray((data as any).labels)) return false;
+    return true;
+  });
+  if (!entries.length) return <span className="muted small">—</span>;
   return (
-    <div className="reads">
-      {rows.map((row, index) => (
-        <div className="read-item" key={`${row.title}-${index}`}>
-          <div className="read-head">
-            <span className="small" style={{ fontWeight: 600 }}>{row.title}</span>
-            {row.tags.map((tag) => (
-              <span className="chip accent" key={tag}>{tag}</span>
-            ))}
-          </div>
+    <dl className="kv">
+      {entries.map(([key, value]) => (
+        <div key={key} style={{ display: "contents" }}>
+          <dt>{KEY_LABELS[key] || key}</dt>
+          <dd style={{ whiteSpace: "normal" }}>
+            <ValueView field={key} value={value} names={names} depth={depth + 1} />
+          </dd>
         </div>
       ))}
+    </dl>
+  );
+}
+
+function ObjectList({ items, names }: { items: any[]; names: Record<string, string> }) {
+  return (
+    <div className="reads">
+      {items.map((item, index) => {
+        const title = item?.name || names[item?.seat || item?.id || ""] || `#${index + 1}`;
+        return (
+          <div className="read-item" key={`${title}-${index}`}>
+            <div className="read-head">
+              <span className="small" style={{ fontWeight: 600 }}>{title}</span>
+              {item?.role && <span className="chip accent">{item.role}</span>}
+              {item?.camp && <span className="chip">{item.camp}</span>}
+              {typeof item?.alive === "boolean" && (
+                <span className={`chip ${item.alive ? "green" : "red"}`}>{item.alive ? "存活" : "出局"}</span>
+              )}
+              {item?.seat_no !== undefined && <span className="muted tiny">座位 {item.seat_no}</span>}
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <ObjectSummary data={item || {}} names={names} />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-/** 把嵌套结构（狼队友 / 查验记录 / 全员身份 / 全员手牌）渲染成可读列表。 */
-function ValueView({ field, value, names }: { field: string; value: any; names: Record<string, string> }) {
+/** 把任意嵌套结构渲染成可读内容；未知字段也使用键值对，不会退回原始 JSON。 */
+function ValueView({
+  field,
+  value,
+  names,
+  depth = 0,
+}: {
+  field: string;
+  value: any;
+  names: Record<string, string>;
+  depth?: number;
+}) {
   const seatName = (id: string) => names[id] || id;
-  if (Array.isArray(value)) {
-    if (value.length && typeof value[0] === "object" && value[0] !== null) {
-      if ("label" in value[0]) {
-        return <CardChips cards={value} />;
-      }
-      return (
-        <DetailRows
-          rows={value.map((item: any) => ({
-            title: item.name || seatName(item.seat || item.id || ""),
-            tags: [
-              item.round !== undefined ? `R${item.round}` : "",
-              typeof item.alive === "boolean" ? (item.alive ? "存活" : "出局") : "",
-              item.result ? String(item.result) : "",
-            ].filter(Boolean),
-          }))}
-        />
-      );
-    }
-    if (value.length && typeof value[0] === "string") {
-      return (
-        <div className="tag-list">
-          {value.map((item) => (
-            <span className="chip" key={item}>{field === "teammate" ? seatName(item) : item}</span>
-          ))}
-        </div>
-      );
-    }
-    if (!value.length) return <span className="muted small">无</span>;
-  }
-  if (value !== null && typeof value === "object") {
-    if (field === "reads") return <ReadsList reads={value} />;
-    const entries = Object.entries(value);
-    if (entries.length && entries.every(([, item]) => item !== null && typeof item === "object")) {
-      return (
-        <DetailRows
-          rows={entries.map(([key, item]: [string, any]) => ({
-            title: item.name || seatName(key),
-            tags: [
-              item.label || item.role ? String(item.label || item.role) : "",
-              Array.isArray(item) ? item.join(" ") : "",
-            ].filter(Boolean),
-          }))}
-        />
-      );
-    }
-    return <pre className="json-block">{JSON.stringify(value, null, 2)}</pre>;
+  if (value === null || value === undefined || value === "") {
+    return <span className="muted small">—</span>;
   }
   if (typeof value === "boolean") {
     return <span className={`chip ${value ? "green" : "red"}`}>{value ? "是" : "否"}</span>;
   }
-  if (value === null || value === undefined || value === "") {
-    return <span className="muted small">—</span>;
+  if (typeof value === "string") {
+    if (field === "phase" || field === "stage") {
+      return <span>{PHASE_LABELS[value] || value}</span>;
+    }
+    if (field === "game") {
+      const gameName = GAME_LABELS[value] || value;
+      return <span>{gameName}</span>;
+    }
+    return <span>{seatName(value)}</span>;
+  }
+  if (typeof value === "number") {
+    return <span>{value}</span>;
+  }
+  if (Array.isArray(value)) {
+    if (!value.length) return <span className="muted small">无</span>;
+    if (value.every((item) => item !== null && typeof item === "object" && "label" in item)) {
+      return <CardChips cards={value} />;
+    }
+    if (value.every((item) => item === null || typeof item !== "object")) {
+      return (
+        <div className="tag-list">
+          {value.map((item, index) => (
+            <span className="chip" key={`${String(item)}-${index}`}>{seatName(String(item))}</span>
+          ))}
+        </div>
+      );
+    }
+    if (value.every((item) => item !== null && typeof item === "object")) {
+      return <ObjectList items={value} names={names} />;
+    }
+    return (
+      <div className="tag-list">
+        {value.map((item, index) => (
+          <span className="chip" key={index}>{seatName(String(item))}</span>
+        ))}
+      </div>
+    );
+  }
+  if (typeof value === "object") {
+    if (field === "reads") return <ReadsList reads={value} />;
+    if (depth >= MAX_VALUE_DEPTH) return <ObjectSummary data={value} names={names} />;
+    return <ObjectView data={value} names={names} depth={depth} />;
   }
   return <span>{String(value)}</span>;
 }
@@ -229,9 +333,22 @@ function PrivatePanel({ data, names }: { data: Record<string, any>; names: Recor
           {data.win_goal && <span className="muted tiny">{data.win_goal}</span>}
         </div>
       )}
+      {Array.isArray(data.items) && data.items.length > 0 && (
+        <div className="tag-list" style={{ marginBottom: 10 }}>
+          {data.items.map((item: any) => (
+            <span
+              className={`chip ${item.available ? "green" : "red"}`}
+              key={item.key || item.label}
+            >
+              {item.label}
+              {item.available === false ? "（不可用）" : ""}
+            </span>
+          ))}
+        </div>
+      )}
       <dl className="kv">
         {entries
-          .filter(([key]) => !["role", "role_label", "camp", "win_goal", "notes"].includes(key))
+          .filter(([key]) => !["role", "role_label", "camp", "win_goal", "notes", "items"].includes(key))
           .map(([key, value]) => (
             <div key={key} style={{ display: "contents" }}>
               <dt>{KEY_LABELS[key] || key}</dt>
@@ -242,6 +359,159 @@ function PrivatePanel({ data, names }: { data: Record<string, any>; names: Recor
           ))}
       </dl>
     </div>
+  );
+}
+
+function GodPanel({
+  snapshot,
+  privates,
+  seats,
+  reads,
+  result,
+  names,
+}: {
+  snapshot: Snapshot | null;
+  privates: Record<string, Record<string, any>>;
+  seats: MatchSeat[];
+  reads: Record<string, any[]>;
+  result: Record<string, any> | null;
+  names: Record<string, string>;
+}) {
+  const publicState = (snapshot?.public_state || {}) as Record<string, any>;
+  const entries = Object.entries(publicState).filter(([key]) => key !== "seats");
+  const publicSeats: any[] = Array.isArray(publicState.seats) ? publicState.seats : [];
+  const publicById = new Map(publicSeats.map((item) => [item.id, item]));
+  const review = (result?.review || {}) as Record<string, string[]>;
+  const reviewSeats = Object.keys(review);
+  return (
+    <>
+      <div className="card inspector-card">
+        <div className="card-title">公共信息（上帝视角）</div>
+        <div className="card-sub" style={{ marginBottom: 10 }}>
+          所有玩家都能看到的状态；私密身份见下方全员身份表。
+        </div>
+        {entries.length ? (
+          <dl className="kv">
+            {entries.map(([key, value]) => (
+              <div key={key} style={{ display: "contents" }}>
+                <dt>{KEY_LABELS[key] || key}</dt>
+                <dd style={{ whiteSpace: "normal" }}>
+                  <ValueView field={key} value={value} names={names} />
+                </dd>
+              </div>
+            ))}
+          </dl>
+        ) : (
+          <div className="muted small">暂无公共状态</div>
+        )}
+      </div>
+
+      <div className="card inspector-card">
+        <div className="card-title" style={{ marginBottom: 10 }}>全员身份与状态</div>
+        <div className="reads">
+          {seats.map((seat) => {
+            const priv = privates[seat.id] || {};
+            const pub = publicById.get(seat.id) || {};
+            const role = priv.role_label || priv.role || "—";
+            const alive = pub.alive ?? priv.alive;
+            const hp = pub.hp ?? priv.hp;
+            const handCount = pub.hand_count ?? priv.hand_count;
+            return (
+              <div className="read-item" key={seat.id}>
+                <div className="read-head">
+                  <span className="seat-dot" style={{ background: seat.color || "#7c9cff" }} />
+                  <span className="small" style={{ fontWeight: 600 }}>{seat.name}</span>
+                  <span className="chip warn">{role}</span>
+                  {priv.camp && <span className="chip">{priv.camp}</span>}
+                  {alive === false ? (
+                    <span className="chip red right">已出局</span>
+                  ) : alive === true ? (
+                    <span className="chip accent right">存活</span>
+                  ) : null}
+                </div>
+                {(hp !== undefined || handCount !== undefined) && (
+                  <div className="muted tiny" style={{ marginTop: 4 }}>
+                    {hp !== undefined && <>体力 {String(hp)}　</>}
+                    {handCount !== undefined && <>手牌 {String(handCount)}</>}
+                  </div>
+                )}
+                {Array.isArray(priv.items) && priv.items.length > 0 && (
+                  <div className="tag-list" style={{ marginTop: 6 }}>
+                    {priv.items.map((item: any) => (
+                      <span
+                        className={`chip ${item.available ? "green" : "red"}`}
+                        key={item.key || item.label}
+                        title={item.available ? "可用" : "已使用 / 不可用"}
+                      >
+                        {item.label}
+                        {item.available === false ? "（不可用）" : ""}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {Array.isArray(priv.hand) && priv.hand.length > 0 && (
+                  <div style={{ marginTop: 6 }}>
+                    <div className="muted tiny" style={{ marginBottom: 3 }}>手牌</div>
+                    <CardChips cards={priv.hand} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="card inspector-card">
+        <div className="card-title" style={{ marginBottom: 4 }}>各 AI 身份预测</div>
+        <div className="card-sub" style={{ marginBottom: 10 }}>
+          每个 AI 最近一次提交的概率判断，用来观察它们是否在“盘逻辑”。
+        </div>
+        {seats.map((seat) => {
+          const list = reads[seat.id] || [];
+          if (!list.length) return null;
+          return (
+            <div className="read-item" key={seat.id} style={{ marginBottom: 8 }}>
+              <div className="read-head">
+                <span className="small" style={{ fontWeight: 600 }}>{seat.name}</span>
+                <span className="muted tiny right">{list.length} 条</span>
+              </div>
+              <div className="tag-list" style={{ marginTop: 4 }}>
+                {list.slice(0, 3).map((read: any, index: number) => (
+                  <span className="chip accent" key={index}>
+                    {read.name || read.seat || "?"}: {read.role || "?"}
+                    {read.confidence != null ? ` ${Math.round(Number(read.confidence) * 100)}%` : ""}
+                  </span>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+        {!seats.some((seat) => (reads[seat.id] || []).length) && (
+          <div className="muted small">尚无身份预测</div>
+        )}
+      </div>
+
+      {reviewSeats.length > 0 && (
+        <div className="card inspector-card">
+          <div className="card-title" style={{ marginBottom: 4 }}>本局复盘（已写入 RAG）</div>
+          <div className="card-sub" style={{ marginBottom: 10 }}>
+            对局结束后自动压缩上下文，提炼成下一局可检索的技巧。
+          </div>
+          {reviewSeats.map((seatId) => (
+            <div className="read-item" key={seatId} style={{ marginBottom: 8 }}>
+              <div className="read-head">
+                <span className="small" style={{ fontWeight: 600 }}>{names[seatId] || seatId}</span>
+              </div>
+              <ul className="muted tiny" style={{ margin: "4px 0 0 16px" }}>
+                {(review[seatId] || []).map((text, index) => (
+                  <li key={index}>{text}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -323,6 +593,7 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
   const [match, setMatch] = useState<MatchDetail | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [privates, setPrivates] = useState<Record<string, Record<string, any>>>({});
+  const [readsState, setReadsState] = useState<Record<string, any[]>>({});
   const [events, setEvents] = useState<GameEvent[]>([]);
   const [status, setStatus] = useState("loading");
   const [perspective, setPerspective] = useState("god");
@@ -330,7 +601,31 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
   const [logsOpen, setLogsOpen] = useState(false);
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(false);
+  const [muted, setMuted] = useState(() => {
+    try {
+      return localStorage.getItem("voice.muted") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const mutedRef = useRef(muted);
   const feedRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    mutedRef.current = muted;
+  }, [muted]);
+
+  useEffect(() => {
+    api.voice().then((cfg) => setVoiceEnabled(!!cfg.enabled)).catch(() => undefined);
+  }, []);
+
+  // 浏览器要求先有用户手势才允许自动朗读；首次点击页面时解锁一次。
+  useEffect(() => {
+    const unlock = () => unlockSpeech();
+    window.addEventListener("pointerdown", unlock, { once: true, passive: true });
+    return () => window.removeEventListener("pointerdown", unlock);
+  }, []);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -339,7 +634,27 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
 
     const connect = () => {
       ws = new WebSocket(`${WS_BASE}/ws/matches/${matchId}`);
-      ws.onopen = () => setConnected(true);
+      ws.onopen = () => {
+        setConnected(true);
+        // 桌面 WebView2 可能完全没有浏览器语音引擎，通知后端本局改用系统语音。
+        // 部分环境音色异步加载，先立即判断一次，1.5 秒后再补一次。
+        const askFallback = () => {
+          const status = speechStatus();
+          // 桌面 WebView2 即使报告有音色也可能无声，直接使用后端系统语音。
+          if (!isTauri() && status.supported && status.voices > 0) return false;
+          try {
+            ws?.send(JSON.stringify({ type: "voice_fallback" }));
+          } catch {
+            /* ignore */
+          }
+          return true;
+        };
+        if (!askFallback()) {
+          setTimeout(() => {
+            if (ws?.readyState === WebSocket.OPEN) askFallback();
+          }, 1500);
+        }
+      };
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -348,6 +663,7 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
             setStatus(data.status || "created");
             setSnapshot(data.state?.game_id ? data.state : null);
             setPrivates(data.privates || {});
+            if (data.reads) setReadsState(data.reads);
             setEvents(mergeEvents([], data.events || []));
             setSelected((prev) => prev || data.match?.seats?.[0]?.id || "");
             setError("");
@@ -356,6 +672,7 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
           } else if (data.type === "state") {
             if (data.state) setSnapshot(data.state);
             if (data.privates) setPrivates(data.privates);
+            if (data.reads) setReadsState(data.reads);
           } else if (data.type === "match_status") {
             setStatus(data.status);
             if (data.state) setSnapshot(data.state);
@@ -368,6 +685,16 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
                 if (detail.privates) setPrivates(detail.privates);
               }).catch(() => undefined);
             }
+          } else if (data.type === "voice") {
+            const finish = () => {
+              try {
+                ws?.send(JSON.stringify({ type: "speech_done", speech_id: data.speech_id }));
+              } catch {
+                /* ignore */
+              }
+            };
+            if (mutedRef.current) finish();
+            else playVoice(data, finish);
           } else if (data.type === "error") {
             setError(data.message || "连接出错");
           }
@@ -386,6 +713,7 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
       closed = true;
       if (timer) clearTimeout(timer);
       ws?.close();
+      if (typeof window !== "undefined") window.speechSynthesis?.cancel();
     };
   }, [matchId]);
 
@@ -431,14 +759,14 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
   }, [events, perspective]);
 
   const latestReads = useMemo(() => {
-    const map: Record<string, any[]> = {};
+    const map: Record<string, any[]> = { ...readsState };
     events.forEach((ev) => {
       if (ev.type === "agent_reads" && ev.payload?.reads && ev.seat_id) {
         map[ev.seat_id] = ev.payload.reads;
       }
     });
     return map;
-  }, [events]);
+  }, [events, readsState]);
 
   const result = snapshot?.result || match?.result || null;
   const finished = snapshot?.finished || status === "finished";
@@ -482,6 +810,40 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
         <div className="row right gap-sm">
           {status === "created" && <button className="btn sm primary" onClick={start}>开始对局</button>}
           {status === "running" && <button className="btn sm danger" onClick={stop}>停止对局</button>}
+          <button
+            className="btn sm ghost"
+            title={
+              !speechSupported()
+                ? "当前环境没有浏览器语音引擎，请到「语音朗读」页切换为系统语音或 VoiceStudio"
+                : voiceEnabled
+                  ? "已开启语音朗读；本机静音后仍会给后端回执，不会拖慢对局"
+                  : "全局语音未开启，点击按钮可直接开启"
+            }
+            onClick={() => {
+              if (!voiceEnabled) {
+                // 语音全局开关未打开时，点一下直接启用，避免“试听有声、对局无声”的困惑。
+                api
+                  .saveVoice({ enabled: true })
+                  .then((cfg) => {
+                    setVoiceEnabled(!!cfg.enabled);
+                    unlockSpeech();
+                  })
+                  .catch(() => undefined);
+                return;
+              }
+              const next = !muted;
+              setMuted(next);
+              if (!next) unlockSpeech();
+              try {
+                localStorage.setItem("voice.muted", next ? "1" : "0");
+              } catch {
+                /* ignore */
+              }
+              if (next) window.speechSynthesis?.cancel();
+            }}
+          >
+            {muted ? "🔇 已静音" : voiceEnabled ? "🔊 语音已开" : "🔇 语音未启用（点击开启）"}
+          </button>
           <button className="btn sm" onClick={() => setLogsOpen(true)}>AI 思考</button>
         </div>
       </div>
@@ -614,37 +976,46 @@ export default function TableView({ matchId, onBack }: { matchId: string; onBack
             </div>
           )}
 
-          <div className="card inspector-card">
-            <div className="row" style={{ marginBottom: 10 }}>
-              <div>
-                <div className="card-title">
-                  {perspective === "god" ? "私有信息（上帝视角）" : `${activeSeat?.name || "AI"} 的私有信息`}
+          {perspective === "god" ? (
+            <GodPanel
+              snapshot={snapshot}
+              privates={privates}
+              seats={match?.seats || []}
+              reads={latestReads}
+              result={result as Record<string, any> | null}
+              names={seatNames}
+            />
+          ) : (
+            <>
+              <div className="card inspector-card">
+                <div className="row" style={{ marginBottom: 10 }}>
+                  <div>
+                    <div className="card-title">{`${activeSeat?.name || "AI"} 的私有信息`}</div>
+                    <div className="card-sub">正在以该 AI 的可见范围查看。</div>
+                  </div>
                 </div>
-                <div className="card-sub">
-                  {perspective === "god" ? "本地展示全部身份与手牌，仅你可见。" : "正在以该 AI 的可见范围查看。"}
-                </div>
+                {activeSeat && (
+                  <div className="row" style={{ marginBottom: 10 }}>
+                    <span className="seat-dot" style={{ background: activeSeat.color || "#7c9cff" }} />
+                    <span className="small" style={{ fontWeight: 600 }}>{activeSeat.name}</span>
+                    <span className="muted tiny">{activeSeat.provider_name || activeSeat.provider_id}</span>
+                  </div>
+                )}
+                {activeSeat && activeSeat.persona && (
+                  <div className="muted tiny mb">人设：{activeSeat.persona}</div>
+                )}
+                <PrivatePanel data={privates[activeSeatId] || {}} names={seatNames} />
               </div>
-            </div>
-            {activeSeat && (
-              <div className="row" style={{ marginBottom: 10 }}>
-                <span className="seat-dot" style={{ background: activeSeat.color || "#7c9cff" }} />
-                <span className="small" style={{ fontWeight: 600 }}>{activeSeat.name}</span>
-                <span className="muted tiny">{activeSeat.provider_name || activeSeat.provider_id}</span>
-              </div>
-            )}
-            {activeSeat && activeSeat.persona && (
-              <div className="muted tiny mb">人设：{activeSeat.persona}</div>
-            )}
-            <PrivatePanel data={privates[activeSeatId] || {}} names={seatNames} />
-          </div>
 
-          <div className="card inspector-card">
-            <div className="card-title" style={{ marginBottom: 4 }}>身份预测</div>
-            <div className="card-sub" style={{ marginBottom: 10 }}>
-              AI 在每次行动前提交的推断（来自模型输出 reads）。
-            </div>
-            <ReadsList reads={latestReads[activeSeatId]} />
-          </div>
+              <div className="card inspector-card">
+                <div className="card-title" style={{ marginBottom: 4 }}>身份预测</div>
+                <div className="card-sub" style={{ marginBottom: 10 }}>
+                  AI 在每次行动前提交的推断（来自模型输出 reads）。
+                </div>
+                <ReadsList reads={latestReads[activeSeatId]} />
+              </div>
+            </>
+          )}
 
           <div className="card inspector-card">
             <div className="card-title" style={{ marginBottom: 10 }}>待行动</div>

@@ -5,9 +5,16 @@ import type {
   Group,
   MatchDetail,
   MatchSummary,
+  MemoryItem,
+  OllamaModels,
   Provider,
   ProviderPreset,
+  RagSettings,
   SeatDraft,
+  TrainRequest,
+  TrainStatus,
+  VoiceDiagnostics,
+  VoiceSettings,
 } from "./types";
 
 export const API_BASE =
@@ -40,6 +47,46 @@ export const api = {
   health: () => request<{ ok: boolean; time: number }>("/api/health"),
   presets: () => request<ProviderPreset[]>("/api/provider-presets"),
   games: () => request<GameInfo[]>("/api/games"),
+
+  voice: () => request<VoiceSettings>("/api/voice"),
+  saveVoice: (data: Partial<VoiceSettings>) =>
+    request<VoiceSettings>("/api/voice", { method: "PUT", body: JSON.stringify(data) }),
+  voiceDiagnostics: () => request<VoiceDiagnostics>("/api/voice/diagnostics"),
+
+  trainStatus: () => request<TrainStatus>("/api/train/status"),
+  startTrain: (data: TrainRequest) => post("/api/train/start", data) as Promise<TrainStatus>,
+  stopTrain: () => post("/api/train/stop") as Promise<TrainStatus>,
+  ollamaModels: (baseUrl?: string) => {
+    const query = baseUrl ? `?base_url=${encodeURIComponent(baseUrl)}` : "";
+    return request<OllamaModels>(`/api/ollama/models${query}`);
+  },
+
+  rag: () => request<RagSettings>("/api/rag"),
+  saveRag: (data: Partial<RagSettings>) =>
+    request<RagSettings>("/api/rag", { method: "PUT", body: JSON.stringify(data) }),
+  memories: (params: { game_id?: string; role?: string; kind?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    });
+    const suffix = query.toString();
+    return request<MemoryItem[]>(`/api/rag/memories${suffix ? `?${suffix}` : ""}`);
+  },
+  createMemory: (data: {
+    text: string;
+    game_id?: string;
+    role?: string;
+    faction?: string;
+    kind?: string;
+  }) => post("/api/rag/memories", data) as Promise<MemoryItem>,
+  deleteMemory: (id: string) => request(`/api/rag/memories/${id}`, { method: "DELETE" }),
+  seedRag: () => post("/api/rag/seed") as Promise<{ ok: boolean; added: number; total: number }>,
+  searchMemories: (q: string, game_id?: string, role?: string, top_k = 8) => {
+    const query = new URLSearchParams({ q, top_k: String(top_k) });
+    if (game_id) query.set("game_id", game_id);
+    if (role) query.set("role", role);
+    return request<MemoryItem[]>(`/api/rag/search?${query.toString()}`);
+  },
 
   providers: () => request<Provider[]>("/api/providers"),
   createProvider: (data: Partial<Provider>) => post("/api/providers", data) as Promise<Provider>,

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import VoicePicker from "../VoicePicker";
 import { api } from "../api";
 import type { GameInfo, Group, MatchSummary, Provider, SeatDraft } from "../types";
 
@@ -76,6 +77,7 @@ export default function LobbyView({
       name: base[i]?.name || `AI ${i + 1}`,
       provider_id: base[i]?.provider_id || defaultProvider,
       persona: base[i]?.persona || "",
+      voice_id: base[i]?.voice_id || "",
     }));
 
   // 游戏/人数/Provider 列表就绪后初始化座位
@@ -100,6 +102,7 @@ export default function LobbyView({
       name: m.name,
       provider_id: m.provider_id,
       persona: m.persona || "",
+      voice_id: m.voice_id || "",
     }));
     setSeats(makeSeats(filled.length, filled, providers[0]?.id || ""));
     setCount(filled.length);
@@ -259,7 +262,12 @@ export default function LobbyView({
                     onChange={(e) => patchSeat(index, { persona: e.target.value })}
                     placeholder="人设（可选），例如：激进、爱开玩笑"
                   />
-                  <div />
+                  <VoicePicker
+                    value={seat.voice_id || ""}
+                    onChange={(value) => patchSeat(index, { voice_id: value })}
+                    placeholder="语音（可选）"
+                    title="留空使用 Provider 默认音色"
+                  />
                 </div>
               ))}
               {!seats.length && <div className="empty">请选择游戏和人数</div>}

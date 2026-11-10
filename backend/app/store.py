@@ -20,8 +20,13 @@ CREATE TABLE IF NOT EXISTS providers (
   api_key TEXT NOT NULL DEFAULT '',
   temperature REAL NOT NULL DEFAULT 0.8,
   max_tokens INTEGER NOT NULL DEFAULT 1200,
+  voice_id TEXT NOT NULL DEFAULT '',
   extra TEXT NOT NULL DEFAULT '{}',
   created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS groups (
   id TEXT PRIMARY KEY,
@@ -71,6 +76,19 @@ CREATE TABLE IF NOT EXISTS agent_logs (
   created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_logs_match ON agent_logs(match_id, seat_id);
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  game_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  faction TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'lesson',
+  text TEXT NOT NULL,
+  embedding TEXT NOT NULL DEFAULT '[]',
+  source TEXT NOT NULL DEFAULT '',
+  match_id TEXT NOT NULL DEFAULT '',
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memories_game ON memories(game_id, role, kind);
 """
 
 
@@ -93,8 +111,32 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._ensure_column("providers", "voice_id", "TEXT NOT NULL DEFAULT ''")
             self._conn.commit()
         self._seed()
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        """为旧数据库补列（CREATE TABLE IF NOT EXISTS 不会修改已有表）。"""
+        columns = [row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")]
+        if column not in columns:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+    # ---------------- settings ----------------
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        if not row:
+            return default
+        return _loads(row["value"], default)
+
+    def set_setting(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, _j(value)),
+            )
+            self._conn.commit()
 
     def _seed(self) -> None:
         with self._lock:
@@ -157,27 +199,30 @@ class Store:
             "api_key": api_key if api_key is not None else "",
             "temperature": float(data.get("temperature", (existing or {}).get("temperature", 0.8))),
             "max_tokens": int(data.get("max_tokens", (existing or {}).get("max_tokens", 1200))),
+            "voice_id": str(
+                data.get("voice_id") if data.get("voice_id") is not None else (existing or {}).get("voice_id", "")
+            ).strip(),
             "extra": _j(data.get("extra", (existing or {}).get("extra", {}))),
         }
         with self._lock:
             if existing:
                 self._conn.execute(
                     """UPDATE providers SET name=?,kind=?,base_url=?,model=?,api_key=?,
-                       temperature=?,max_tokens=?,extra=? WHERE id=?""",
+                       temperature=?,max_tokens=?,voice_id=?,extra=? WHERE id=?""",
                     (
                         payload["name"], payload["kind"], payload["base_url"], payload["model"],
                         payload["api_key"], payload["temperature"], payload["max_tokens"],
-                        payload["extra"], provider_id,
+                        payload["voice_id"], payload["extra"], provider_id,
                     ),
                 )
             else:
                 self._conn.execute(
-                    """INSERT INTO providers(id,name,kind,base_url,model,api_key,temperature,max_tokens,extra,created_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    """INSERT INTO providers(id,name,kind,base_url,model,api_key,temperature,max_tokens,voice_id,extra,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         provider_id, payload["name"], payload["kind"], payload["base_url"],
                         payload["model"], payload["api_key"], payload["temperature"],
-                        payload["max_tokens"], payload["extra"], time.time(),
+                        payload["max_tokens"], payload["voice_id"], payload["extra"], time.time(),
                     ),
                 )
             self._conn.commit()
@@ -313,6 +358,74 @@ class Store:
             }
             for r in rows
         ]
+
+    # ---------------- memories (RAG) ----------------
+    def add_memory(self, data: dict) -> dict:
+        memory_id = data.get("id") or uuid.uuid4().hex[:16]
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO memories
+                   (id,game_id,role,faction,kind,text,embedding,source,match_id,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    memory_id,
+                    data.get("game_id") or "",
+                    data.get("role") or "",
+                    data.get("faction") or "",
+                    data.get("kind") or "manual",
+                    data.get("text") or "",
+                    _j(data.get("embedding") or []),
+                    data.get("source") or "",
+                    data.get("match_id") or "",
+                    time.time(),
+                ),
+            )
+            self._conn.commit()
+        return self.get_memory(memory_id) or {}
+
+    def get_memory(self, memory_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+        return self._memory_row(row) if row else None
+
+    def list_memories(
+        self,
+        game_id: str | None = None,
+        role: str | None = None,
+        kind: str | None = None,
+        limit: int = 500,
+    ) -> list[dict]:
+        sql = "SELECT * FROM memories WHERE 1=1"
+        args: list[Any] = []
+        if game_id:
+            sql += " AND (game_id=? OR game_id='')"
+            args.append(game_id)
+        if role:
+            sql += " AND (role=? OR role='' OR role='通用')"
+            args.append(role)
+        if kind:
+            sql += " AND kind=?"
+            args.append(kind)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        args.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [self._memory_row(row) for row in rows]
+
+    def delete_memory(self, memory_id: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
+            self._conn.commit()
+
+    def count_memories(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) c FROM memories").fetchone()
+        return int(row["c"])
+
+    def _memory_row(self, row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["embedding"] = _loads(item.get("embedding", "[]"), [])
+        return item
 
     # ---------------- agent logs ----------------
     def add_log(
